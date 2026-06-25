@@ -9,7 +9,7 @@ the same key, and gets the same response back.
 ## Why
 
 Many apps give you no way to change where they send their requests. A browser on
-claude.ai, or the ChatGPT desktop app, has no setting that points it at a gateway.
+claude.ai or chatgpt.com has no setting that points it at a gateway.
 The only place left to intercept that traffic is on the machine itself, before it
 leaves. aitori decrypts only the hosts you list and leaves the rest alone, and if
 the gateway is unavailable the request still reaches its original destination.
