@@ -41,6 +41,10 @@ Install the binary (macOS/Linux):
 curl -fsSL https://raw.githubusercontent.com/truefoundry/aitori/main/install.sh | sh
 ```
 
+To remove aitori later, see [Uninstall](docs/getting-started.md#1-install) (revert
+system changes with `sudo aitori down` and `sudo aitori ca remove` before deleting
+the binaries).
+
 Then govern this machine and watch the traffic live — no gateway, no config:
 
 ```bash

@@ -13,8 +13,12 @@ curl -fsSL https://raw.githubusercontent.com/truefoundry/aitori/main/install.sh 
 ```
 
 This downloads the release tarball for your OS/arch, verifies its checksum, and
-installs `aitori` and `aitori-gateway` to `/usr/local/bin`. Set
-`AITORI_INSTALL_DIR` to install elsewhere, or `VERSION=vX.Y.Z` to pin a release.
+installs `aitori` and `aitori-gateway`. The install location is `~/.local/bin`
+when it's already on your `PATH` (a no-sudo install); otherwise `/usr/local/bin`
+(always on `PATH`, but root-owned, so you'll be prompted for `sudo`). Set
+`AITORI_INSTALL_DIR` to force a location, or `VERSION=vX.Y.Z` to pin a release.
+The installer prints the exact paths it wrote and the uninstall steps when it
+finishes.
 
 > **macOS note:** binaries are unsigned. A `curl`-downloaded binary runs as-is.
 > If you instead download the tarball in a browser, clear Gatekeeper quarantine
@@ -22,6 +26,33 @@ installs `aitori` and `aitori-gateway` to `/usr/local/bin`. Set
 
 Windows isn't covered by the installer — grab the tarball from the
 [Releases page](https://github.com/truefoundry/aitori/releases).
+
+<details>
+<summary><strong>Uninstall</strong></summary>
+
+aitori changes system state beyond the binaries (a per-device CA in the trust
+store, the system proxy, and edits to client configs like Claude Code's
+`settings.json`). **Revert that first, while the binary still exists** — `down`
+and `ca remove` *are* the uninstall logic, so deleting the binary first strands
+those changes.
+
+```bash
+sudo aitori down          # revert the system proxy + undo client-config edits
+sudo aitori ca remove     # remove the per-device CA from the system trust store
+
+# then delete the binaries (use the path the installer printed):
+rm -f /usr/local/bin/aitori /usr/local/bin/aitori-gateway   # or ~/.local/bin/...
+
+# optional: drop the local state (CA private key, gateway token, trace DBs):
+rm -rf ~/.aitori
+```
+
+There is no `aitori uninstall` command — the steps above are the supported path.
+Upgrading, by contrast, needs none of this: just re-run the install command (it
+overwrites the binaries in place); the CA is reused, so it doesn't need
+reinstalling.
+
+</details>
 
 ## 2. See your traffic (no gateway needed)
 
