@@ -1,0 +1,33 @@
+# golangci-lint configuration for aitori.
+# Conservative, widely-accepted linters suitable for an open-source codebase.
+
+run:
+  timeout: 5m
+  # The project targets Go 1.25, but golangci-lint-action's prebuilt binary is
+  # built with go1.24 and refuses to analyze a module targeting a newer Go. Pin
+  # the analysis target to 1.24 to keep lint green. Drop this once the action
+  # ships a go1.25-built golangci-lint.
+  go: "1.24"
+
+linters:
+  enable:
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - errcheck
+    - misspell
+    - revive
+    - gofmt
+    - goimports
+
+linters-settings:
+  goimports:
+    local-prefixes: github.com/truefoundry/aitori
+
+issues:
+  exclude-rules:
+    # Best-effort cleanup paths and stream copies intentionally ignore errors.
+    - path: _test\.go
+      linters:
+        - errcheck

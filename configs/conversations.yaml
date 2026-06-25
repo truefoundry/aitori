@@ -1,0 +1,98 @@
+# aitori targeted-tracing config.
+#
+# Trace ONLY the conversation / message / MCP-tool-call endpoints for Claude,
+# ChatGPT, and the Anthropic & OpenAI APIs — with correct per-app
+# tagging. Each intercept_hosts entry scopes WHAT to trace on that host via
+# `paths` (glob patterns) and `methods`; everything else on the host is decrypted
+# but passed through automatically (no separate passthrough rules needed).
+#
+# Path globs:  "*" = one path segment (no "/")   "**" = any, including "/"
+#
+# Validate:  aitori config validate configs/conversations.yaml
+
+version: 1
+
+builtin_profiles: false
+
+proxy:
+  listen: 127.0.0.1:8080
+  ca_dir: ~/.aitori
+  force_http11: true
+  max_body_kb: 1024
+  drain_timeout: 5s
+
+gateway:
+  url: http://127.0.0.1:9000 # local aitori-gateway for validation
+  on_error: fail_open
+  dial_timeout: 5s
+  auth:
+    token_file: ~/.aitori/token
+    # disabled: true   # reroute without requiring a token (or pass --no-auth)
+
+# ── Hosts + the endpoints to trace on each ────────────────────────────────────
+# An entry with `paths`/`methods` traces only matching requests (reroute); all
+# other paths on that host pass through. The gateway therefore sees only the
+# calls that matter.
+intercept_hosts:
+  # Anthropic API — Messages API (Claude Code, SDKs).
+  - host: api.anthropic.com
+    paths: ["/v1/messages", "/v1/messages/**", "/v1/complete"]
+    methods: ["POST"]
+    category: llm
+    action: reroute
+
+  # Claude web/desktop — conversation completions. The org + conversation ids
+  # are wildcard segments; POST-only so settings/sync GETs are not traced.
+  - host: claude.ai
+    paths:
+      - "/api/organizations/*/chat_conversations/*/completion"
+      - "/api/organizations/*/chat_conversations/*/retry_completion"
+      - "/api/append_message"
+    methods: ["POST"]
+    category: llm
+    action: reroute
+
+  # ChatGPT web.
+  - host: chatgpt.com
+    paths:
+      - "/backend-anon/f/conversation" # current ChatGPT web app conversation endpoint
+      - "/backend-api/conversation" # logged-in web (older)
+      - "/backend-api/f/conversation"
+    methods: ["POST"]
+    category: llm
+    action: reroute
+
+  # OpenAI API — chat / responses / completions (SDKs).
+  - host: api.openai.com
+    paths: ["/v1/chat/completions", "/v1/responses", "/v1/responses/**", "/v1/completions"]
+    methods: ["POST"]
+    category: llm
+    action: reroute
+
+  # NEVER add the gateway host here (loop prevention).
+
+## ── MCP tool calls (cross-host, body-matched) ─────────────────────────────────
+## JSON-RPC `tools/call` on ANY intercepted host. To capture remote MCP servers,
+## add their hosts to intercept_hosts above.
+#rules:
+#  - { name: mcp-tool-calls, match_body: { jsonrpc: "2.0", method: "tools/call" }, category: mcp, action: reroute }
+
+# ── Tags ──────────────────────────────────────────────────────────────────────
+# Correct app attribution. Specific desktop/CLI matchers precede browser
+# fallbacks so they win. bundle_id matches on macOS; process_names cover
+# Linux/Windows.
+apps:
+  # Claude
+  - { id: claude-code, match: { exe_paths: ["~/.local/share/claude/versions"], process_names: ["claude"] } }
+  - { id: claude-desktop, match: { bundle_id: com.anthropic.claudefordesktop, process_names: ["Claude"] } }
+  - { id: claude-web, match: { browser: true, hosts: ["claude.ai"] } }
+  # ChatGPT / OpenAI
+  - { id: chatgpt-web, match: { browser: true, hosts: ["chatgpt.com"] } }
+
+# ── Client-config injection ───────────────────────────────────────────────────
+# Claude Code ignores the system proxy and its own CA bundle, so it can't be
+# captured by Tier-1 alone — patch its settings env (managed-settings.json under
+# `up`, else ~/.claude/settings.json) so a new session routes through aitori and
+# trusts the device CA. Applied on `up`, reverted on `down`.
+inject:
+  - { app: claude-code, mode: settings, enabled: true }

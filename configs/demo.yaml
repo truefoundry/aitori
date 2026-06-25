@@ -1,0 +1,25 @@
+# aitori demo / inspect-and-passthrough config.
+#
+# The simplest way to see aitori work: NO gateway, just decrypt the common AI
+# hosts, classify each call, pass it straight through to the real upstream, and
+# show everything live in a browser. The built-in profiles already govern Claude,
+# ChatGPT, and the Anthropic/OpenAI APIs, so this file only turns on the live UI.
+#
+#   sudo aitori up -c configs/demo.yaml      # whole machine (macOS/Linux)
+#   open http://127.0.0.1:9100                # live traffic
+#   sudo aitori down                         # revert the system proxy when done
+#
+# (Equivalent with no file at all: `sudo aitori up --ui` — the built-ins govern
+# the same hosts, and --ui turns on this view.)
+#
+# Validate:  aitori config validate configs/demo.yaml
+
+version: 1
+
+# No `gateway:` block → every intercepted call is inspected, then passed through
+# to its real upstream (fail-open). Add a gateway later to actually reroute.
+
+# Embedded live-traffic view (no external gateway needed).
+ui:
+  enabled: true
+  listen: 127.0.0.1:9100

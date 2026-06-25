@@ -1,0 +1,77 @@
+{{define "list"}}<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>aitori-gateway traces</title>{{template "styles"}}</head>
+<body>
+<h1><a href="{{.Prefix}}/">aitori-gateway traces</a></h1>
+
+{{if .TraceID}}
+<p class="banner">Trace <span class="mono">{{.TraceID}}</span> — {{len .Spans}} span(s) · <a href="{{.Prefix}}/">← all traces</a></p>
+{{else}}
+<form method="get" action="{{.Prefix}}/">
+  <input type="text" name="q" placeholder="search url / name" value="{{.Filter.Text}}">
+  <select name="app">
+    <option value="">all apps</option>
+    {{range .Apps}}<option value="{{.}}" {{if eq . $.Filter.App}}selected{{end}}>{{.}}</option>{{end}}
+  </select>
+  <select name="category">
+    <option value="">all categories</option>
+    {{range .Categories}}<option value="{{.}}" {{if eq . $.Filter.Category}}selected{{end}}>{{.}}</option>{{end}}
+  </select>
+  <select name="status">
+    <option value="">any status</option>
+    <option value="400" {{if eq .Filter.MinHTTP 400}}selected{{end}}>4xx+</option>
+    <option value="500" {{if eq .Filter.MinHTTP 500}}selected{{end}}>5xx</option>
+  </select>
+  <button type="submit">Search</button>
+</form>
+{{end}}
+
+<table>
+  <thead><tr><th>Time</th><th>App</th><th>Category</th><th>Method</th><th>URL</th><th>Status</th><th>ms</th><th></th></tr></thead>
+  <tbody id="rows">
+  {{range .Spans}}
+    <tr>
+      <td class="mono">{{nanoTime .StartNano}}</td>
+      <td>{{if .App}}{{.App}}{{else}}—{{end}}</td>
+      <td>{{.Category}}</td>
+      <td>{{.HTTPMethod}}</td>
+      <td class="url"><a href="{{$.Prefix}}/span/{{.SpanID}}" title="{{.HTTPURL}}">{{if .HTTPURL}}{{.HTTPURL}}{{else}}{{.Name}}{{end}}</a></td>
+      <td class="{{statusClass .HTTPStatus}}">{{if .HTTPStatus}}{{.HTTPStatus}}{{else}}—{{end}}</td>
+      <td class="mono">{{printf "%.1f" .DurationMS}}</td>
+      <td><a href="{{$.Prefix}}/trace/{{.TraceID}}">trace</a></td>
+    </tr>
+  {{else}}
+    <tr id="empty-row"><td colspan="8" class="empty">no spans yet — send a request through the gateway</td></tr>
+  {{end}}
+  </tbody>
+</table>
+
+{{if .Live}}
+<script>
+(function () {
+  var prefix = {{.Prefix}};
+  var tbody = document.getElementById("rows");
+  function cls(c) { return c >= 500 ? "err" : c >= 400 ? "warn" : c > 0 ? "ok" : ""; }
+  function esc(s) { var d = document.createElement("div"); d.textContent = s == null ? "" : s; return d.innerHTML; }
+  try {
+    var es = new EventSource(prefix + "/stream");
+    es.onmessage = function (ev) {
+      var s = JSON.parse(ev.data);
+      var empty = document.getElementById("empty-row");
+      if (empty) empty.remove();
+      var tr = document.createElement("tr");
+      tr.innerHTML =
+        '<td class="mono">' + esc(s.time) + '</td>' +
+        '<td>' + (s.app ? esc(s.app) : "—") + '</td>' +
+        '<td>' + esc(s.category) + '</td>' +
+        '<td>' + esc(s.method) + '</td>' +
+        '<td class="url"><a href="' + prefix + '/span/' + encodeURIComponent(s.spanID) + '">' + esc(s.url) + '</a></td>' +
+        '<td class="' + cls(s.status) + '">' + (s.status ? s.status : "—") + '</td>' +
+        '<td class="mono">' + s.ms.toFixed(1) + '</td>' +
+        '<td><a href="' + prefix + '/trace/' + encodeURIComponent(s.traceID) + '">trace</a></td>';
+      tbody.insertBefore(tr, tbody.firstChild);
+    };
+  } catch (e) { /* SSE unsupported; static snapshot still works */ }
+})();
+</script>
+{{end}}
+</body></html>{{end}}

@@ -1,0 +1,21 @@
+# Binaries
+/aitori
+/dist/
+*.exe
+*.test
+*.out
+
+# Local agent state (CA, token) if created in-tree during testing
+.aitori/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+/bin/
+/.claude/
+
+# Trace store (aitori-gateway)
+*.db
+*.db-shm
+*.db-wal

@@ -1,0 +1,71 @@
+# Built-in defaults, embedded into the aitori binary and overlaid under your
+# config (anything you define by the same host/app id wins). With these, a fresh
+# `aitori up` (no config file) governs the common apps out of the box.
+#
+# Three concerns, three lists:
+#   intercept_hosts — what to decrypt + govern (everything else is spliced)
+#   apps            — how to TAG a decrypted request (process / browser host)
+#   inject          — opt-in client-config injection (proxy-ignoring clients)
+#
+# Each intercept_hosts entry scopes WHAT to trace on that host via `paths` (globs)
+# and `methods`; everything else on the host is decrypted but passed through.
+# Path globs:  "*" = one segment (no "/")   "**" = any, including "/".
+# Hosts/paths are STARTING POINTS — verify against a real capture before trusting
+# them. Set `builtin_profiles: false` in your config to ignore all of this.
+
+intercept_hosts:
+  # Anthropic API — Messages API (Claude Code, SDKs).
+  - host: api.anthropic.com
+    paths: ["/v1/messages", "/v1/messages/**", "/v1/complete"]
+    methods: ["POST"]
+    category: llm
+    action: reroute
+
+  # Claude web/desktop — conversation completions. Org + conversation ids are
+  # wildcard segments; POST-only so settings/sync GETs are not traced.
+  - host: claude.ai
+    paths:
+      - "/api/organizations/*/chat_conversations/*/completion"
+      - "/api/organizations/*/chat_conversations/*/retry_completion"
+      - "/api/append_message"
+    methods: ["POST"]
+    category: llm
+    action: reroute
+
+  # ChatGPT web.
+  - host: chatgpt.com
+    paths:
+      - "/backend-anon/f/conversation" # current ChatGPT web app conversation endpoint
+      - "/backend-api/conversation" # logged-in web (older)
+      - "/backend-api/f/conversation"
+    methods: ["POST"]
+    category: llm
+    action: reroute
+
+  # OpenAI API — chat / responses / completions (SDKs).
+  - host: api.openai.com
+    paths: ["/v1/chat/completions", "/v1/responses", "/v1/responses/**", "/v1/completions"]
+    methods: ["POST"]
+    category: llm
+    action: reroute
+  # NOTE: never add the gateway host here (loop prevention).
+
+# Correct app attribution. Specific desktop/CLI matchers precede browser
+# fallbacks so they win. bundle_id matches on macOS; process_names cover
+# Linux/Windows.
+apps:
+  # Matched by bundle id (desktop) so its "Claude" process name doesn't collide
+  # with the claude-code CLI.
+  - { id: claude-desktop, match: { bundle_id: com.anthropic.claudefordesktop, process_names: ["Claude"] } }
+  # CLI: the versioned native binary, plus the "claude" process name (covers the
+  # VSCode extension's bundled claude). NOT "node" — too broad for a tag.
+  - { id: claude-code, match: { exe_paths: ["~/.local/share/claude/versions"], process_names: ["claude"] } }
+  - { id: chatgpt-web, match: { browser: true, hosts: ["chatgpt.com"] } }
+  - { id: claude-web, match: { browser: true, hosts: ["claude.ai"] } }
+
+# Opt-in client-config injection (escape hatch for clients that ignore the
+# system proxy). Applied on `up`, reverted on `down`. Override per app in your
+# config (by app id). claude-code uses settings injection (managed-settings.json
+# env) and is on by default.
+inject:
+  - { app: claude-code, mode: settings, enabled: true }

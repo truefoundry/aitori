@@ -1,0 +1,59 @@
+{{define "detail"}}<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>span · {{.Span.Name}}</title>{{template "styles"}}</head>
+<body>
+<h1><a href="{{.Prefix}}/">aitori-gateway traces</a></h1>
+<p class="banner"><a href="{{.Prefix}}/trace/{{.Span.TraceID}}">← trace {{.Span.TraceID}}</a></p>
+
+<h2>{{.Span.Name}} <span class="{{statusClass .Span.HTTPStatus}}">{{if .Span.HTTPStatus}}{{.Span.HTTPStatus}}{{end}}</span></h2>
+<p class="mono">{{nanoTime .Span.StartNano}} · {{printf "%.1f" .Span.DurationMS}} ms · {{.Span.StatusCode}}{{if .Span.StatusMsg}} — {{.Span.StatusMsg}}{{end}}</p>
+
+<h3>Attributes</h3>
+<table>
+  {{range .Attrs}}<tr><td class="k">{{.K}}</td><td class="mono v">{{.V}}</td></tr>{{end}}
+</table>
+
+{{if .Span.Events}}
+<h3>Events</h3>
+{{range .Span.Events}}
+  <div class="event">
+    <div class="ename">{{.Name}} <span class="mono">{{nanoTime .TimeNano}}</span></div>
+    {{range $k, $v := .Attrs}}<div class="k">{{$k}}</div><div class="jsonview" data-json="{{$v}}"></div>{{end}}
+  </div>
+{{end}}
+
+<script>
+(function () {
+  function leaf(text, cls) { var s = document.createElement("span"); s.className = cls; s.textContent = text; return s; }
+  function render(v) {
+    if (v === null) return leaf("null", "jnull");
+    var t = typeof v;
+    if (t === "number" || t === "boolean") return leaf(String(v), "j" + t);
+    if (t === "string") return leaf(JSON.stringify(v), "jstring");
+    var arr = Array.isArray(v);
+    var entries = arr ? v.map(function (x, i) { return [i, x]; }) : Object.keys(v).map(function (k) { return [k, v[k]]; });
+    var d = document.createElement("details"); d.open = true;
+    var sum = document.createElement("summary");
+    sum.textContent = arr ? "[" + entries.length + "]" : "{" + entries.length + "}";
+    d.appendChild(sum);
+    var ul = document.createElement("ul"); ul.className = "jsontree";
+    entries.forEach(function (e) {
+      var li = document.createElement("li");
+      li.appendChild(leaf(e[0] + ": ", "jkey"));
+      li.appendChild(render(e[1]));
+      ul.appendChild(li);
+    });
+    d.appendChild(ul);
+    return d;
+  }
+  document.querySelectorAll(".jsonview").forEach(function (el) {
+    var raw = el.getAttribute("data-json") || "";
+    var s = raw.trim();
+    if (s && (s[0] === "{" || s[0] === "[")) {
+      try { el.appendChild(render(JSON.parse(s))); return; } catch (e) { /* not JSON */ }
+    }
+    var pre = document.createElement("pre"); pre.textContent = raw; el.appendChild(pre);
+  });
+})();
+</script>
+{{end}}
+</body></html>{{end}}

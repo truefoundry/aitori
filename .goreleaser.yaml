@@ -1,0 +1,56 @@
+# goreleaser configuration for aitori.
+#
+# Produces one tar.gz per OS/arch, each containing BOTH binaries (aitori +
+# aitori-gateway) plus the example config and LICENSE. No system packages
+# (deb/rpm). Signing/notarization is not configured.
+version: 2
+
+project_name: aitori
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: aitori
+    main: ./cmd/aitori
+    binary: aitori
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X github.com/truefoundry/aitori/internal/version.Version={{.Version}}
+
+  # aitori-gateway is a separate Go module under tools/aitori-gateway.
+  - id: aitori-gateway
+    dir: tools/aitori-gateway
+    main: .
+    binary: aitori-gateway
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+
+archives:
+  # One archive per OS/arch bundling both binaries + the example config.
+  - id: aitori
+    ids: [aitori, aitori-gateway]
+    formats: [tar.gz]
+    files:
+      - configs/demo.yaml
+      - configs/conversations.yaml
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  draft: true
+
+changelog:
+  use: github
