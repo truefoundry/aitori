@@ -14,7 +14,8 @@
 #
 # Overrides (env vars):
 #   VERSION              install a specific tag (e.g. v0.1.0); default: latest
-#   AITORI_INSTALL_DIR  install location; default: /usr/local/bin
+#   AITORI_INSTALL_DIR  install location; default: ~/.local/bin if it's already
+#                        on your PATH (no sudo), else /usr/local/bin
 #   AITORI_REPO         owner/repo; default: truefoundry/aitori
 #
 # NOTE: requires a *published* (non-draft) GitHub release. To test against a
@@ -23,7 +24,19 @@
 set -eu
 
 REPO="${AITORI_REPO:-truefoundry/aitori}"
-INSTALL_DIR="${AITORI_INSTALL_DIR:-/usr/local/bin}"
+
+# Default install dir: prefer ~/.local/bin when it's already on PATH (a no-sudo
+# install that's immediately findable); otherwise fall back to /usr/local/bin
+# (always on PATH on macOS, but root-owned, so it needs sudo). An explicit
+# AITORI_INSTALL_DIR always wins.
+if [ -n "${AITORI_INSTALL_DIR:-}" ]; then
+  INSTALL_DIR="$AITORI_INSTALL_DIR"
+else
+  INSTALL_DIR="/usr/local/bin"
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) INSTALL_DIR="$HOME/.local/bin" ;;
+  esac
+fi
 
 info() { printf 'aitori: %s\n' "$1" >&2; }
 fail() { printf 'aitori: error: %s\n' "$1" >&2; exit 1; }
@@ -112,11 +125,23 @@ if [ -z "$sudo" ] && [ ! -w "$INSTALL_DIR" ] && [ "$(id -u)" != "0" ]; then
   fi
 fi
 
-$sudo mkdir -p "$INSTALL_DIR"
-$sudo mv -f "$tmp/aitori" "$INSTALL_DIR/aitori"
-[ -f "$tmp/aitori-gateway" ] && $sudo mv -f "$tmp/aitori-gateway" "$INSTALL_DIR/aitori-gateway"
+# Do the mkdir + both moves in a single elevated shell, so sudo prompts at most
+# once (some hosts disable sudo's credential cache, which would otherwise prompt
+# for every separate sudo call). `set -e` inside makes any step abort the
+# subshell with a non-zero status; the outer `set -e` then aborts the install —
+# so a failed mkdir/mv can't be masked as success. The gateway move is wrapped
+# so a legitimately-absent gateway binary isn't itself treated as a failure.
+$sudo sh -e -c '
+  mkdir -p "$1"
+  mv -f "$2/aitori" "$1/aitori"
+  if [ -f "$2/aitori-gateway" ]; then
+    mv -f "$2/aitori-gateway" "$1/aitori-gateway"
+  fi
+' sh "$INSTALL_DIR" "$tmp" || fail "failed to install binaries to $INSTALL_DIR"
 
-info "installed aitori $tag to $INSTALL_DIR"
+info "installed aitori $tag to:"
+info "  $INSTALL_DIR/aitori"
+info "  $INSTALL_DIR/aitori-gateway"
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *) info "note: $INSTALL_DIR is not on your PATH — add it (e.g. export PATH=\"$INSTALL_DIR:\$PATH\")" ;;
@@ -127,6 +152,12 @@ cat >&2 <<EOF
 Next:
   sudo aitori up --ui      # govern this machine (built-in profiles) + live UI
   open http://127.0.0.1:9100 # watch traffic flow through
+
+To uninstall (revert system changes BEFORE deleting the binaries):
+  sudo aitori down                 # revert system proxy + client-config edits
+  sudo aitori ca remove            # remove the per-device CA from the trust store
+  rm -f $INSTALL_DIR/aitori $INSTALL_DIR/aitori-gateway
+  rm -rf ~/.aitori                 # optional: CA key, token, local state
 
 Docs: https://github.com/$REPO
 EOF
