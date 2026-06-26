@@ -112,7 +112,7 @@ block (or pass `--gateway-url` / `--token-file`) and LLM/MCP calls reroute throu
 it instead of going straight upstream.
 
 - **TrueFoundry AI Gateway** — where to copy the base URL + API key, and the
-  required `tf-edge-proxy/` suffix: [truefoundry_gateway.md](truefoundry_gateway.md).
+  required `ai-proxy/` suffix: [truefoundry_gateway.md](truefoundry_gateway.md).
 - **Any gateway** — the reroute contract a gateway must implement, and all the
   overrides: [gateway.md](gateway.md).
 

@@ -33,7 +33,7 @@ aitori run -c configs/conversations.yaml \
 
 Notes:
 
-- A **path** on `gateway.url` (e.g. `/api/llm/tf-edge-proxy/`) is sent verbatim as
+- A **path** on `gateway.url` (e.g. `/api/llm/ai-proxy/`) is sent verbatim as
   the endpoint — the gateway routes to the real upstream from `x-tfy-original-url`,
   not from this path.
 - `gateway.headers` adds static headers on the agent→gateway leg only. The three
@@ -49,7 +49,7 @@ Notes:
 ## Example: TrueFoundry AI Gateway
 
 For the TrueFoundry AI Gateway, the exact steps — where to copy the base URL and
-API key, the required `tf-edge-proxy/` path suffix, and where to save the token —
+API key, the required `ai-proxy/` path suffix, and where to save the token —
 are in [truefoundry_gateway.md](truefoundry_gateway.md).
 
 ## The reroute contract (gateway side)

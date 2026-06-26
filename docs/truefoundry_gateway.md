@@ -18,17 +18,17 @@ The base URL looks like:
 https://<host>/api/llm
 ```
 
-## 2. Append `tf-edge-proxy/` to the URL
+## 2. Append `ai-proxy/` to the URL
 
 > **Required.** aitori must target the gateway's edge-proxy route, not the bare
-> base URL. Take the base URL from the UI and **append `tf-edge-proxy/`** (keep
+> base URL. Take the base URL from the UI and **append `ai-proxy/`** (keep
 > the trailing slash):
 >
 > ```
-> https://<host>/api/llm/tf-edge-proxy/
+> https://<host>/api/llm/ai-proxy/
 > ```
 >
-> This `…/api/llm/tf-edge-proxy/` value is what you pass to aitori as the
+> This `…/api/llm/ai-proxy/` value is what you pass to aitori as the
 > gateway URL.
 
 ## 3. Save the token on the device
@@ -48,16 +48,16 @@ Point aitori at the gateway URL and token via flags (overriding the config), and
 stop the local mock gateway if it's running:
 
 ```bash
-sudo ./bin/aitori up -v -c configs/conversations.yaml \
-  --gateway-url "https://<host>/api/llm/tf-edge-proxy/" \
+sudo aitori up -v \
+  --gateway-url "https://<host>/api/llm/ai-proxy/" \
   --token-file ~/.aitori/tf_token
 ```
 
-Or set them directly in the config instead of flags:
+Or set them directly in the config `config.yaml` instead of flags:
 
 ```yaml
 gateway:
-  url: https://<host>/api/llm/tf-edge-proxy/    # base URL + tf-edge-proxy/
+  url: https://<host>/api/llm/ai-proxy/    # base URL + ai-proxy/
   on_error: fail_open
   auth:
     token_file: ~/.aitori/tf_token
@@ -67,12 +67,19 @@ gateway:
     x-tfy-logging-config: '{"enabled": true}'
 ```
 
+and run:
+
+```bash
+sudo aitori up -v \
+  -c config.yaml --ui
+```
+
 ## 5. Verify
 
 ```bash
-./bin/aitori status -c configs/conversations.yaml \
-  --gateway-url "https://<host>/api/llm/tf-edge-proxy/" --token-file ~/.aitori/tf_token
-#   gateway:   https://<host>/api/llm/tf-edge-proxy/ [reachable]
+aitori status \
+  --gateway-url "https://<host>/api/llm/ai-proxy/" --token-file ~/.aitori/tf_token
+#   gateway:   https://<host>/api/llm/ai-proxy/ [reachable]
 #   token:     ~/.aitori/tf_token (ok)
 ```
 

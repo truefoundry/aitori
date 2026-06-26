@@ -85,8 +85,8 @@ func TestRewriteGatewayPathVerbatim(t *testing.T) {
 	for _, tc := range []struct{ gw, wantURI string }{
 		// The gateway path is used verbatim as the endpoint; the request's own
 		// path (/v1/messages) is NOT appended. Query is preserved.
-		{"https://gateway.truefoundry.example/api/llm/tf-edge-proxy", "/api/llm/tf-edge-proxy?beta=1"},
-		{"https://gateway.truefoundry.example/tf-edge-proxy/", "/tf-edge-proxy/?beta=1"}, // trailing slash kept as-is
+		{"https://gateway.truefoundry.example/api/llm/ai-proxy", "/api/llm/ai-proxy?beta=1"},
+		{"https://gateway.truefoundry.example/ai-proxy/", "/ai-proxy/?beta=1"}, // trailing slash kept as-is
 		// A query on gateway.url is preserved, merged ahead of the request's query.
 		{"https://gateway.truefoundry.example/edge?tenant=acme", "/edge?tenant=acme&beta=1"},
 	} {
