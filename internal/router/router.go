@@ -208,7 +208,7 @@ func (r *Router) Rewrite(req *http.Request, appID, category string, pid int) (re
 
 	// 5. Point the upstream dial at the gateway. Scheme/host come from the
 	//    gateway URL; when gateway.url includes a path (e.g.
-	//    https://gw/api/llm/tf-edge-proxy) that path is used VERBATIM as the
+	//    https://gw/api/llm/ai-proxy) that path is used VERBATIM as the
 	//    endpoint — the request's own path is NOT appended to it. The real
 	//    destination travels in x-tfy-original-url, which the gateway reads. A
 	//    root/empty gateway path preserves the original request path (back-compat
