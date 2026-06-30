@@ -141,6 +141,12 @@ and shown by `aitori status`.
 - [docs/roadmap.md](docs/roadmap.md) — status, validated platforms, and open work
 - [AGENTS.md](AGENTS.md) — architecture and conventions, for contributors
 
+## The name
+
+**aitori** (*A.I.-tor-ee*) is **ai** + **tori** — and 鳥居 *torii* is the gate at the
+entrance to a Japanese shrine. Which is the whole idea: aitori is the gate every AI
+call passes through on its way out. 🪧
+
 ## License
 
 [Apache-2.0](LICENSE).
