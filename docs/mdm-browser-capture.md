@@ -496,6 +496,78 @@ Confirm nothing else changed: no Claude Code `managed-settings.json` or
 `~/.claude/settings.json` is touched, and `aitori status` lists only claude.ai and
 chatgpt.com.
 
+## Debugging and operations
+
+Common commands for inspecting, restarting, and stopping the managed service.
+Config paths referenced below are `/Library/Application Support/aitori/config.yaml`
+on macOS and `/etc/aitori/config.yaml` on Linux.
+
+**One thing to keep in mind:** the service is configured to auto-restart
+(`KeepAlive` on macOS, `Restart=always` on Linux), so killing the process does not
+stop it — it respawns. To actually hold it down for debugging, unload or disable it
+(below). And because aitori sets the system proxy / nftables rules, prefer a
+graceful stop over `kill -9`; if the machine's traffic looks broken after an
+unclean stop, run `aitori down` to revert.
+
+### macOS (launchd)
+
+```bash
+# Status — running? (look for "state" and "pid")
+sudo launchctl print system/com.truefoundry.aitori | grep -E "state|pid|program"
+
+# Logs (the plist writes stdout/stderr here)
+tail -f /var/log/aitori.log
+
+# Restart (kill if running, then start)
+sudo launchctl kickstart -k system/com.truefoundry.aitori
+
+# Stop and hold it down (KeepAlive would otherwise respawn it)
+sudo launchctl disable system/com.truefoundry.aitori
+sudo launchctl enable  system/com.truefoundry.aitori    # undo
+
+# Unload the service entirely (leaves binary, config, and CA in place)
+sudo launchctl bootout system /Library/LaunchDaemons/com.truefoundry.aitori.plist
+```
+
+### Linux (systemd)
+
+```bash
+# Status + live logs
+systemctl status aitori
+journalctl -u aitori -f
+
+# Restart / stop (a systemctl stop is graceful; Restart=always won't fight it)
+sudo systemctl restart aitori
+sudo systemctl stop aitori
+
+# Disable so it does not come back at boot
+sudo systemctl disable --now aitori
+```
+
+### Run in the foreground for a fast debug loop
+
+To iterate on config or watch traffic live, stop the service and run aitori yourself
+with `-v` (verbose). `Ctrl-C` reverts cleanly; restore the managed service afterward
+by re-running the MDM script (or `launchctl bootstrap` / `systemctl start`).
+
+```bash
+# macOS
+sudo launchctl bootout system/com.truefoundry.aitori
+sudo aitori up -c "/Library/Application Support/aitori/config.yaml" -v
+
+# Linux
+sudo systemctl stop aitori
+sudo aitori up -c /etc/aitori/config.yaml -v
+```
+
+If a stop ever leaves the machine's traffic broken (system proxy or nftables rules
+pointing at a stopped agent), reset it explicitly:
+
+```bash
+sudo aitori down -c "/Library/Application Support/aitori/config.yaml"   # macOS
+sudo aitori down -c /etc/aitori/config.yaml                            # Linux
+```
+
 ## Uninstall
 
 Revert system changes while the binary still exists, then remove it.
