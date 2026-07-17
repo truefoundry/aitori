@@ -197,8 +197,10 @@ func (c *CA) CertPEM() []byte { return c.certPEM }
 // Cert returns the parsed CA certificate.
 func (c *CA) Cert() *x509.Certificate { return c.cert }
 
-// LeafForName returns a leaf certificate for host, minting and caching one if
-// necessary. host may include a :port, which is stripped.
+// LeafForName returns a leaf certificate for host, minting and caching one for
+// reuse if necessary. host may include a :port, which is stripped. Minted certs
+// are cached by host (SNI) so a repeat handshake to the same host reuses the
+// signed certificate instead of re-signing on every connection.
 func (c *CA) LeafForName(host string) (*tls.Certificate, error) {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
@@ -207,22 +209,29 @@ func (c *CA) LeafForName(host string) (*tls.Certificate, error) {
 		return nil, errors.New("ca: empty host for leaf certificate")
 	}
 
+	// Fast path: a cached, still-valid cert under a read lock.
 	c.mu.RLock()
-	if tlsc, ok := c.leafs[host]; ok {
-		if leafValid(tlsc, host) {
-			c.mu.RUnlock()
-			return tlsc, nil
-		}
-	}
+	tlsc, ok := c.leafs[host]
 	c.mu.RUnlock()
+	if ok && leafValid(tlsc, host) {
+		return tlsc, nil
+	}
 
+	// Miss (or expired): mint under the write lock, re-checking first so that
+	// concurrent first-hits for the same host sign once and share the result
+	// (no thundering herd of duplicate certs). Minting is a single CA signature
+	// and happens only on a cold or expired host, so holding the lock briefly is
+	// cheaper than the wasted work of many goroutines minting in parallel.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if tlsc, ok := c.leafs[host]; ok && leafValid(tlsc, host) {
+		return tlsc, nil
+	}
 	tlsc, err := c.mintLeaf(host)
 	if err != nil {
 		return nil, err
 	}
-	c.mu.Lock()
 	c.leafs[host] = tlsc
-	c.mu.Unlock()
 	return tlsc, nil
 }
 

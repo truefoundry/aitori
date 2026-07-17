@@ -58,6 +58,7 @@ type Options struct {
 	Logger    *slog.Logger
 	Proc      ProcResolver // optional desktop-app attribution
 	Recorder  Recorder     // optional local observability sink
+	Tracer    Tracer       // optional OpenTelemetry span exporter
 	// DialContext, if set, is used for the raw CONNECT splice of
 	// non-allowlisted hosts (defaults to a net.Dialer). It is also the hook
 	// for transparent-mode self-exclusion (M5).
@@ -75,6 +76,12 @@ type reloadable struct {
 	interceptHosts []string
 	gatewayHost    string
 	maxBody        int64
+	// traceCategories selects which categories are turned into spans; nil when
+	// tracing is off. traceContent mirrors tracing.capture_content, and
+	// traceCaptureLimit bounds the buffered response body (bytes; 0 = default).
+	traceCategories   map[string]bool
+	traceContent      bool
+	traceCaptureLimit int
 }
 
 // Proxy is the selective-MITM proxy server.
@@ -84,6 +91,7 @@ type Proxy struct {
 	log         *slog.Logger
 	proc        ProcResolver
 	recorder    Recorder
+	tracer      Tracer
 	mitmTLS     *tls.Config
 	dialTimeout time.Duration
 	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -119,6 +127,7 @@ func New(o Options) *Proxy {
 		log:         logger,
 		proc:        o.Proc,
 		recorder:    o.Recorder,
+		tracer:      o.Tracer,
 		dialTimeout: dialTimeout,
 		dialContext: o.DialContext,
 		coverage:    newCoverage(),
@@ -143,6 +152,14 @@ func newReloadable(cfg *config.Config, rtr *router.Router, pl *pipeline.Pipeline
 		rl.gatewayHost = hostmatch.Normalize(cfg.GatewayHost())
 		if cfg.Proxy.MaxBodyKB > 0 {
 			rl.maxBody = int64(cfg.Proxy.MaxBodyKB) * 1024
+		}
+		if cfg.Tracing.Enabled {
+			rl.traceCategories = make(map[string]bool)
+			for _, c := range cfg.Tracing.CategoriesOrDefault() {
+				rl.traceCategories[c] = true
+			}
+			rl.traceContent = cfg.Tracing.CaptureContent
+			rl.traceCaptureLimit = cfg.Tracing.CaptureLimitBytes()
 		}
 	}
 	return rl

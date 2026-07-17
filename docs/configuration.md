@@ -52,6 +52,7 @@ The top-level keys map onto those steps:
 | `proxy` | the local listener, the CA directory, and how bodies are handled |
 | `ui` | the built-in live-traffic view |
 | `sinks` | JSON-line logs of each exchange |
+| `tracing` | export OpenTelemetry spans of each LLM/MCP call to an OTLP receiver |
 | `inject` | settings-patching for clients that ignore the system proxy |
 | `builtin_profiles` | whether the bundled defaults are included (default: yes) |
 
@@ -213,6 +214,64 @@ sinks:
 
 For a durable, searchable view, the bundled `aitori-gateway` records each call to
 SQLite and serves its own trace UI; see [development.md](development.md).
+
+## `tracing` — export OpenTelemetry spans
+
+As an alternative to routing calls through a gateway for capture, aitori can turn
+each intercepted LLM/MCP call into an OpenTelemetry span and export it to an OTLP
+receiver itself. Spans follow the GenAI semantic conventions (`gen_ai.*`): the
+model, provider, request parameters, token usage (input/output/reasoning/cache),
+and finish reasons, plus aitori's own attribution (`aitori.app`,
+`aitori.category`). MCP calls carry `rpc.jsonrpc.method`. Export goes through a
+batch span processor, so the request path is never blocked on the network.
+
+```yaml
+tracing:
+  enabled: true
+  endpoint: https://internal.example.com/api/otel   # OTLP receiver base URL
+  protocol: http                                     # http (default) | grpc
+  service_name: aitori
+  headers:
+    Authorization: "Bearer ${TFY_API_KEY}"           # ${ENV} expanded at load
+    TFY-Tracing-Project: "truefoundry:tracing-project:my-project"
+  categories: [llm, mcp]                              # what to turn into spans
+  capture_content: false                             # prompt/completion content (off)
+  sample_ratio: 1.0                                   # head sampling, 0..1
+  batch:
+    max_queue_size: 2048
+    max_export_batch_size: 512
+    batch_timeout: 5s
+    export_timeout: 30s
+```
+
+- `endpoint` — the OTLP receiver. For `protocol: http` it is the collector's base
+  URL; the standard `/v1/traces` path is appended automatically (so
+  `https://host/api/otel` posts to `https://host/api/otel/v1/traces`). For
+  `protocol: grpc` it is a `host:port`.
+- `headers` — static headers sent on every export (auth token, tenant/project
+  selector, …). Values support `${VAR}` and `${VAR:-default}` expansion against
+  the environment, so a config file that ships to a laptop need not embed the
+  credential. `endpoint` is expanded too.
+- `capture_content` — **off by default.** On a shared or employee device the
+  prompt/completion text is sensitive, so only metadata (model, token counts,
+  latency, status) is recorded unless you opt in. When on, the input messages,
+  system instructions, and completion are added to the span in the structured
+  GenAI message shape (`gen_ai.input.messages` / `gen_ai.output.messages` /
+  `gen_ai.system_instructions`).
+- `max_capture_kb` — bound (default 256) on how much of a **non-streaming**
+  response body is held in memory to read token usage; beyond it the body is
+  truncated and not parsed. Streaming (SSE) responses are scanned line by line
+  and never fully buffered, so token usage is captured regardless of size.
+- `categories` — which classified categories become spans (default `llm` + `mcp`).
+- `insecure` — use `http://` / skip TLS (for a local collector).
+- `sample_ratio` — head-based sampling in `0..1`; unset/`0` always samples.
+- `batch` — batch span processor tuning; omitted fields use the SDK defaults
+  (queue 2048, batch 512, `batch_timeout` 5s, `export_timeout` 30s).
+
+Tracing works with `run` or `up`, with or without a gateway. Enabling it needs a
+restart (the exporter is built at start-up); the traced categories and content
+flag do reload on SIGUSR1. [`configs/tracing.yaml`](../configs/tracing.yaml) is a
+worked example.
 
 ## `inject` — clients that ignore the system proxy
 

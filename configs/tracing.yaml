@@ -1,0 +1,77 @@
+# aitori OpenTelemetry tracing config.
+#
+# Instead of routing LLM/MCP calls through a gateway for capture, aitori turns
+# each intercepted call into an OpenTelemetry span (GenAI semantic conventions:
+# model, provider, token usage, finish reasons) and exports it to a configured
+# OTLP receiver via a batch processor. No gateway is required.
+#
+# Secrets stay out of this file: header values support ${ENV} and
+# ${ENV:-default} expansion, so the credential is read from the environment at
+# start-up (handy for a fleet deployment onto employee laptops).
+#
+# Validate:  aitori config validate configs/tracing.yaml
+# Run:       TFY_API_KEY=... sudo -E aitori up -c configs/tracing.yaml
+
+version: 1
+
+proxy:
+  listen: 127.0.0.1:8080
+  ca_dir: ~/.aitori
+  max_body_kb: 1024 # request body is buffered up to this cap to build the span
+
+# ── Where spans go ────────────────────────────────────────────────────────────
+tracing:
+  enabled: true
+  # OTLP receiver. For protocol "http" this is the collector base URL; the
+  # "/v1/traces" signal path is appended automatically. For TrueFoundry:
+  endpoint: https://internal.devtest.truefoundry.tech/api/otel
+  protocol: http # http (OTLP/HTTP protobuf, default) | grpc
+  service_name: aitori # resource service.name reported to the collector
+
+  # Static headers sent on every export. ${ENV} is expanded at load time.
+  headers:
+    Authorization: "Bearer ${AITORI_API_KEY}"
+    TFY-Tracing-Project: "truefoundry:tracing-project:moh-trace"
+
+  # Which classified categories become spans (default: llm + mcp).
+  categories: [llm, mcp]
+
+  # Prompt/completion CONTENT is OFF by default — on a shared/employee device the
+  # message text is sensitive, so only metadata (model, tokens, latency) is
+  # captured. Set true to also record input/output messages on spans (structured
+  # per the GenAI conventions).
+  capture_content: true
+
+  # Cap (KiB) on how much of a non-streaming response body is held in memory to
+  # read token usage; beyond it the body is truncated (and not parsed). Streaming
+  # (SSE) responses are scanned incrementally and never fully held. Default 256.
+  max_capture_kb: 2048
+
+  # Optional head-based sampling (0/unset = always sample).
+  # sample_ratio: 1.0
+
+  # Batch span processor tuning (all optional; SDK defaults shown).
+  batch:
+    max_queue_size: 2048
+    max_export_batch_size: 512
+    batch_timeout: 5s
+    export_timeout: 30s
+
+# ── Hosts to decrypt & trace ──────────────────────────────────────────────────
+# The built-in profiles already cover Claude/ChatGPT/Anthropic/OpenAI; add your
+# own hosts here. A bare host lets the body heuristic classify llm/mcp; scope it
+# with paths/methods to trace only specific endpoints.
+intercept_hosts:
+  - host: api.anthropic.com
+    paths: ["/v1/messages", "/v1/messages/**", "/v1/complete"]
+    methods: ["POST"]
+    category: llm
+  - host: api.openai.com
+    paths: ["/v1/chat/completions", "/v1/responses", "/v1/responses/**", "/v1/completions", "/v1/embeddings"]
+    methods: ["POST"]
+    category: llm
+
+# App attribution rides on each span as aitori.app.
+apps:
+  - { id: claude-code, match: { exe_paths: ["~/.local/share/claude/versions"], process_names: ["claude"] } }
+  - { id: chatgpt-web, match: { browser: true, hosts: ["chatgpt.com"] } }

@@ -90,6 +90,29 @@ of straight to the provider. [docs/gateway.md](docs/gateway.md) describes what a
 gateway has to implement; for the TrueFoundry AI Gateway, the exact URL and token
 steps are in [docs/truefoundry_gateway.md](docs/truefoundry_gateway.md).
 
+## Export OpenTelemetry traces
+
+Instead of (or alongside) a gateway, aitori can turn each intercepted LLM/MCP
+call into an OpenTelemetry span — model, provider, token usage, finish reasons,
+and app attribution — and export it to any OTLP receiver via a batch processor.
+No gateway is required. Point it at a collector in the config:
+
+```yaml
+version: 1
+tracing:
+  enabled: true
+  endpoint: https://internal.example.com/api/otel   # OTLP/HTTP receiver
+  headers:
+    Authorization: "Bearer ${TFY_API_KEY}"          # ${ENV} kept out of the file
+intercept_hosts:
+  - api.openai.com
+```
+
+Prompt/completion content is off by default (only metadata is captured); set
+`tracing.capture_content: true` to include it. See the
+[`tracing`](docs/configuration.md#tracing--export-opentelemetry-spans) reference
+and [`configs/tracing.yaml`](configs/tracing.yaml).
+
 ## Configuration
 
 The built-in profiles already govern the common apps, so `aitori up` works with

@@ -1,10 +1,12 @@
 package ca
 
 import (
+	"crypto/tls"
 	"crypto/x509"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 )
 
@@ -83,5 +85,39 @@ func TestLeafCacheReturnsSame(t *testing.T) {
 	b, _ := c.LeafForName("claude.ai")
 	if a != b {
 		t.Error("expected cached leaf to be reused")
+	}
+	// The :port form must hit the same cache entry as the bare host.
+	if p, _ := c.LeafForName("claude.ai:443"); p != a {
+		t.Error("expected host:port to reuse the bare-host cache entry")
+	}
+}
+
+// Concurrent first-hits for a cold host must mint exactly one cert and share it
+// (double-checked locking dedups the thundering herd).
+func TestLeafCacheConcurrentDedup(t *testing.T) {
+	c, err := LoadOrCreate(t.TempDir(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const n = 32
+	var wg sync.WaitGroup
+	results := make([]*tls.Certificate, n)
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			cert, err := c.LeafForName("api.openai.com")
+			if err != nil {
+				t.Errorf("mint: %v", err)
+				return
+			}
+			results[i] = cert
+		}(i)
+	}
+	wg.Wait()
+	for i := 1; i < n; i++ {
+		if results[i] != results[0] {
+			t.Fatalf("goroutine %d got a different cert: cache did not dedup concurrent mints", i)
+		}
 	}
 }

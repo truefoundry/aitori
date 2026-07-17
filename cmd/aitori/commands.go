@@ -29,6 +29,7 @@ import (
 	"github.com/truefoundry/aitori/internal/router"
 	"github.com/truefoundry/aitori/internal/sink"
 	"github.com/truefoundry/aitori/internal/token"
+	"github.com/truefoundry/aitori/internal/tracing"
 	"github.com/truefoundry/aitori/internal/version"
 )
 
@@ -39,6 +40,7 @@ type agent struct {
 	token   *token.FileSource
 	proxy   *proxy.Proxy
 	sink    sink.Sink
+	tracer  *tracing.Provider
 	ui      *liveui.Server
 	tHandle adapter.TransparentHandle
 }
@@ -49,6 +51,13 @@ func (a *agent) close() {
 	}
 	if a.sink != nil {
 		a.sink.Close()
+	}
+	// Flush any spans still buffered in the batch processor. serve() also does
+	// this on graceful shutdown; a second call is a harmless no-op.
+	if a.tracer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = a.tracer.Shutdown(ctx)
 	}
 }
 
@@ -77,6 +86,17 @@ func buildAgent(cmd *cobra.Command) (*agent, error) {
 	snk, err := sink.Build(cfg.Sinks)
 	if err != nil {
 		return nil, fmt.Errorf("build sinks: %w", err)
+	}
+
+	// Optional OpenTelemetry tracing exporter. When enabled, aitori emits a span
+	// per intercepted LLM/MCP call and exports it to the configured OTLP
+	// receiver via a batch processor — an alternative to a gateway for capture.
+	var tracer *tracing.Provider
+	if cfg.Tracing.Enabled {
+		tracer, err = tracing.New(context.Background(), cfg.Tracing, version.Version, deviceHostname(), log)
+		if err != nil {
+			return nil, fmt.Errorf("init tracing: %w", err)
+		}
 	}
 
 	// The live UI is just another sink (in-memory + SSE). Combine it with the
@@ -109,9 +129,12 @@ func buildAgent(cmd *cobra.Command) (*agent, error) {
 	if recorder != nil {
 		opts.Recorder = recorder
 	}
+	if tracer != nil {
+		opts.Tracer = tracer
+	}
 	px := proxy.New(opts)
 
-	return &agent{cfg: cfg, ca: dca, token: tok, proxy: px, sink: recorder, ui: ui}, nil
+	return &agent{cfg: cfg, ca: dca, token: tok, proxy: px, sink: recorder, tracer: tracer, ui: ui}, nil
 }
 
 // buildRouter constructs the gateway router from cfg, sharing the given token
@@ -233,6 +256,9 @@ func (a *agent) serve(withOS bool) error {
 			_ = uiSrv.Shutdown(shctx)
 		}
 		_ = a.proxy.Shutdown(shctx)
+		if a.tracer != nil {
+			_ = a.tracer.Shutdown(shctx)
+		}
 		return nil
 	case err := <-srvErr:
 		if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
@@ -399,6 +425,10 @@ func (a *agent) printStartup(addr string, withOS, transparent bool) {
 		fmt.Fprintf(os.Stderr, "  token:          %s (%s)\n", a.cfg.Gateway.Auth.TokenFile, a.token.State())
 	}
 	fmt.Fprintf(os.Stderr, "  intercepting:   %d host pattern(s)\n", len(a.cfg.InterceptHosts))
+	if a.tracer != nil {
+		fmt.Fprintf(os.Stderr, "  tracing:        %s (%s, categories: %s)\n",
+			a.cfg.Tracing.Endpoint, a.cfg.Tracing.ProtocolOrDefault(), strings.Join(a.cfg.Tracing.CategoriesOrDefault(), ","))
+	}
 	if a.ui != nil {
 		fmt.Fprintf(os.Stderr, "  live UI:        http://%s/\n", a.cfg.UI.Listen)
 	}
@@ -617,6 +647,12 @@ func cmdStatus() *cobra.Command {
 				fmt.Printf("gateway:       (not configured)\n")
 			} else {
 				fmt.Printf("gateway:       %s [%s]\n", cfg.Gateway.URL, probeGateway(cfg))
+			}
+
+			if cfg.Tracing.Enabled {
+				fmt.Printf("tracing:       %s (%s) [%s]\n", cfg.Tracing.Endpoint, cfg.Tracing.ProtocolOrDefault(), strings.Join(cfg.Tracing.CategoriesOrDefault(), ","))
+			} else {
+				fmt.Printf("tracing:       (not configured)\n")
 			}
 
 			fmt.Printf("intercept:     %d host pattern(s), %d app profile(s)\n", len(cfg.InterceptHosts), len(cfg.Apps))

@@ -93,6 +93,49 @@ func (c *Config) expandPaths() {
 	for i := range c.Apps {
 		ExpandAppPaths(&c.Apps[i])
 	}
+	// Tracing header values may reference secrets via ${ENV} so a config that
+	// ships to a laptop need not embed the credential itself.
+	for k, v := range c.Tracing.Headers {
+		c.Tracing.Headers[k] = expandEnv(v)
+	}
+	c.Tracing.Endpoint = expandEnv(c.Tracing.Endpoint)
+}
+
+// expandEnv expands ${VAR} and ${VAR:-default} references against the process
+// environment. Unlike os.ExpandEnv it supports a :- default and leaves bare "$"
+// untouched, so a literal endpoint or header value with no braces is unchanged.
+func expandEnv(s string) string {
+	if !strings.Contains(s, "${") {
+		return s
+	}
+	var b strings.Builder
+	for {
+		i := strings.Index(s, "${")
+		if i < 0 {
+			b.WriteString(s)
+			break
+		}
+		b.WriteString(s[:i])
+		rest := s[i+2:]
+		j := strings.Index(rest, "}")
+		if j < 0 {
+			// Unterminated; emit verbatim and stop.
+			b.WriteString(s[i:])
+			break
+		}
+		ref := rest[:j]
+		s = rest[j+1:]
+		name, def := ref, ""
+		if k := strings.Index(ref, ":-"); k >= 0 {
+			name, def = ref[:k], ref[k+2:]
+		}
+		if val, ok := os.LookupEnv(name); ok && val != "" {
+			b.WriteString(val)
+		} else {
+			b.WriteString(def)
+		}
+	}
+	return b.String()
 }
 
 // ExpandAppPaths expands a leading "~" in an app profile's path-valued match
@@ -219,6 +262,65 @@ func (c *Config) Validate() error {
 		}
 		if s.Type == "file" && s.Path == "" {
 			return fmt.Errorf("sinks[%d]: file sink requires a path", i)
+		}
+	}
+
+	if err := c.Tracing.validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (t *TracingConfig) validate() error {
+	if !t.Enabled {
+		return nil
+	}
+	if t.Endpoint == "" {
+		return fmt.Errorf("tracing.endpoint must be set when tracing.enabled is true")
+	}
+	switch t.ProtocolOrDefault() {
+	case TracingProtocolHTTP:
+		u, err := url.Parse(t.Endpoint)
+		if err != nil {
+			return fmt.Errorf("tracing.endpoint %q invalid: %w", t.Endpoint, err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("tracing.endpoint %q must be http or https for protocol http", t.Endpoint)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("tracing.endpoint %q must include a host", t.Endpoint)
+		}
+	case TracingProtocolGRPC:
+		// host:port (no scheme); accept a scheme-less authority.
+	default:
+		return fmt.Errorf("tracing.protocol %q invalid (want http|grpc)", t.Protocol)
+	}
+	for k := range t.Headers {
+		if strings.TrimSpace(k) == "" {
+			return fmt.Errorf("tracing.headers contains an empty header name")
+		}
+	}
+	if t.Timeout != "" {
+		if _, err := time.ParseDuration(t.Timeout); err != nil {
+			return fmt.Errorf("tracing.timeout %q invalid: %w", t.Timeout, err)
+		}
+	}
+	if t.SampleRatio < 0 || t.SampleRatio > 1 {
+		return fmt.Errorf("tracing.sample_ratio %v invalid (want 0..1)", t.SampleRatio)
+	}
+	for _, c := range t.Categories {
+		if err := validateCategory("tracing.categories", c, false); err != nil {
+			return err
+		}
+	}
+	if t.Batch.BatchTimeout != "" {
+		if _, err := time.ParseDuration(t.Batch.BatchTimeout); err != nil {
+			return fmt.Errorf("tracing.batch.batch_timeout %q invalid: %w", t.Batch.BatchTimeout, err)
+		}
+	}
+	if t.Batch.ExportTimeout != "" {
+		if _, err := time.ParseDuration(t.Batch.ExportTimeout); err != nil {
+			return fmt.Errorf("tracing.batch.export_timeout %q invalid: %w", t.Batch.ExportTimeout, err)
 		}
 	}
 	return nil

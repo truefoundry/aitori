@@ -11,6 +11,7 @@ import (
 	"github.com/truefoundry/aitori/internal/appresolve"
 	"github.com/truefoundry/aitori/internal/capture"
 	"github.com/truefoundry/aitori/internal/config"
+	"github.com/truefoundry/aitori/internal/genai"
 	"github.com/truefoundry/aitori/internal/hostmatch"
 	"github.com/truefoundry/aitori/internal/pipeline"
 )
@@ -53,12 +54,16 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, mitm bool) {
 	// — so the body streams straight to the upstream instead of being buffered
 	// (lower latency, notably for large uploads on passthrough paths). Reroute
 	// still buffers, both to classify and to replay the body on a fail-open retry.
+	// Tracing needs the request body to classify (llm/mcp via the heuristic) and
+	// to extract GenAI attributes, so buffer it whenever tracing is on — the
+	// same reason a match_body rule (BodyMatters) forces buffering.
+	tracing := p.tracer != nil && rl.traceCategories != nil
 	var (
 		bodyBytes []byte
 		full      bool // body buffered & replayable
 		dec       pipeline.Decision
 	)
-	if rl.pipeline.BodyMatters() {
+	if rl.pipeline.BodyMatters() || tracing {
 		bodyBytes, full = drainBody(r, rl.maxBody)
 		dec = rl.pipeline.Decide(r, flow, bodyBytes)
 	} else {
@@ -71,8 +76,19 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, mitm bool) {
 	}
 
 	oc := &outcome{}
+	// Arm response capture for the traced categories so copyResponse tees the
+	// stream (verbatim to the client, plus a bounded scan for token usage).
+	if tracing && rl.traceCategories[dec.Category] {
+		oc.trace = true
+		oc.provider = genai.ProviderFor(hostmatch.Normalize(host))
+		oc.captureContent = rl.traceContent
+		oc.captureLimit = rl.traceCaptureLimit
+	}
 	start := time.Now()
 	defer p.record(start, r, scheme, host, dec, oc)
+	if oc.trace {
+		defer p.emitSpan(start, r, scheme, host, dec, oc, bodyBytes)
+	}
 
 	contentLength := r.ContentLength
 	if full {
@@ -160,6 +176,15 @@ type outcome struct {
 	rerouted   bool
 	gatewayGap bool
 	errMsg     string
+
+	// Tracing: when trace is set, copyResponse tees the response through a
+	// bounded accumulator to extract GenAI token usage without buffering the
+	// whole (streamed) body.
+	trace          bool
+	provider       string
+	captureContent bool
+	captureLimit   int
+	respAcc        *genai.ResponseAccumulator
 }
 
 func writeError(w http.ResponseWriter, oc *outcome, msg string) {
@@ -188,6 +213,39 @@ func (p *Proxy) record(start time.Time, r *http.Request, scheme, host string, de
 		DurationMS: time.Since(start).Milliseconds(),
 		GatewayGap: oc.gatewayGap,
 		Error:      oc.errMsg,
+	})
+}
+
+// emitSpan builds a GenAI/MCP observation from the finished exchange and hands
+// it to the tracer. reqBody is the buffered request body (nil if it exceeded
+// the body cap and streamed). Response metadata comes from the accumulator that
+// copyResponse fed while streaming.
+func (p *Proxy) emitSpan(start time.Time, r *http.Request, scheme, host string, dec pipeline.Decision, oc *outcome, reqBody []byte) {
+	if p.tracer == nil {
+		return
+	}
+	req := genai.ParseRequest(hostmatch.Normalize(host), r.URL.Path, reqBody, oc.captureContent)
+	var resp genai.ResponseInfo
+	if oc.respAcc != nil {
+		resp = oc.respAcc.Result()
+	}
+	p.tracer.Emit(genai.Observation{
+		Start:    start,
+		End:      time.Now(),
+		App:      dec.AppID,
+		Category: dec.Category,
+		Action:   dec.Action,
+		Rerouted: oc.rerouted,
+		FailOpen: oc.gatewayGap,
+		Method:   r.Method,
+		Scheme:   scheme,
+		Host:     hostmatch.Normalize(host),
+		Path:     r.URL.Path,
+		PID:      dec.PID,
+		Status:   oc.status,
+		Err:      oc.errMsg,
+		Request:  req,
+		Response: resp,
 	})
 }
 
@@ -224,6 +282,12 @@ func (p *Proxy) newOutgoing(r *http.Request, scheme, host string, body io.ReadCl
 func (p *Proxy) copyResponse(w http.ResponseWriter, res *http.Response, oc *outcome) {
 	defer res.Body.Close()
 
+	// Arm the GenAI response accumulator before headers are stripped, so it sees
+	// the Content-Type (SSE vs JSON) and can extract token usage from the stream.
+	if oc.trace && oc.respAcc == nil {
+		oc.respAcc = genai.NewResponseAccumulator(oc.provider, res.Header.Get("Content-Type"), oc.captureContent, oc.captureLimit)
+	}
+
 	dst := w.Header()
 	removeHopByHop(res.Header)
 	copyHeader(dst, res.Header)
@@ -245,6 +309,9 @@ func (p *Proxy) copyResponse(w http.ResponseWriter, res *http.Response, oc *outc
 	for {
 		n, err := res.Body.Read(buf)
 		if n > 0 {
+			if oc.respAcc != nil {
+				oc.respAcc.Write(buf[:n])
+			}
 			if nw, werr := w.Write(buf[:n]); werr != nil {
 				oc.bytes += int64(nw)
 				return

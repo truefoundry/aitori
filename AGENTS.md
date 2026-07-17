@@ -18,6 +18,8 @@ internal/
   appresolve/           flow -> app attribution (bundle/exe/process/host)
   pipeline/             resolve -> classify -> action (reroute | passthrough)
   proxy/                selective-MITM server, splice, streaming forward, fail-open
+  genai/                provider-agnostic LLM/MCP body parsing (no OTel dep)
+  tracing/              OpenTelemetry span export (OTLP + batch processor)
   adapter/              OS interface + build-tagged impls (darwin/linux/windows)
   clientcfg/            patches client config (Claude Code settings.json) on up/down
   sysuser/              SUDO_USER-aware home/uid resolution (single source of truth)
@@ -34,8 +36,14 @@ test/integration/       end-to-end tests (gateway + fake upstream + SSE)
 Two Go modules:
 
 - root (`github.com/truefoundry/aitori`) — the agent. Stays dependency-light.
-- `tools/aitori-gateway` — its own module; carries the heavier OTel + SQLite
-  deps so they never reach the agent.
+- `tools/aitori-gateway` — its own module; carries the heavier SQLite deps (and
+  its own OTel usage) so they never reach the agent.
+
+The agent's one heavyweight dependency is the OpenTelemetry SDK, used by the
+optional `tracing` exporter (config `tracing.enabled`). It is confined to
+`internal/tracing`; the body parsing that feeds it lives in `internal/genai`,
+which has no OTel dependency, so `proxy` — the correctness-critical hot path —
+produces plain `genai.Observation` records and never imports the OTel SDK.
 
 **Always build and test with `CGO_ENABLED=0`.** A transitive gopsutil dependency
 (`go-m1cpu`) crashes at init under cgo on recent Go/macOS. The `Makefile` sets

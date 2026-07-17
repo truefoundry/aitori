@@ -7,7 +7,11 @@
 // overrides). Apps no longer gate interception — they are labels.
 package config
 
-import "gopkg.in/yaml.v3"
+import (
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
 
 // SchemaVersion is the only config major version this build understands.
 // The loader rejects any other version (plan §18: "loader rejects unknown
@@ -35,6 +39,11 @@ type Config struct {
 	// reverted on `down`. Built-in defaults are overlaid by app id.
 	Inject []InjectEntry `yaml:"inject,omitempty"`
 	Sinks  []SinkConfig  `yaml:"sinks"` // optional local debug
+	// Tracing is the optional OpenTelemetry tracing exporter. When enabled,
+	// aitori turns each intercepted LLM/MCP call into an OTel span (GenAI
+	// semantic conventions) and exports it to a configured OTLP receiver via a
+	// batch processor — an alternative to a gateway for capturing spans.
+	Tracing TracingConfig `yaml:"tracing,omitempty"`
 	// UI is the optional embedded live-traffic view (off by default). When
 	// enabled, the agent serves a self-contained page showing exchanges flowing
 	// through it — useful as a no-gateway demo / local observability.
@@ -214,6 +223,107 @@ func (e InjectEntry) On() bool { return e.Enabled == nil || *e.Enabled }
 type SettingsInject struct {
 	ManagedPath string `yaml:"managed_path,omitempty"`
 	UserPath    string `yaml:"user_path,omitempty"`
+}
+
+// TracingConfig configures the OpenTelemetry tracing exporter. It is
+// deliberately open-ended (endpoint + protocol + headers + batch tuning) so a
+// fleet deployment can point it at any OTLP receiver without a code change. All
+// header values support ${ENV} / ${ENV:-default} expansion, so credentials
+// (e.g. a bearer token) can be supplied by the environment rather than written
+// into the config file that ships to a laptop.
+type TracingConfig struct {
+	Enabled bool `yaml:"enabled,omitempty"`
+	// Endpoint is the OTLP receiver. For protocol "http" it is the full base
+	// URL of the collector (e.g. https://host/api/otel); the standard
+	// "/v1/traces" signal path is appended unless the URL already ends in it.
+	// For "grpc" it is a host:port.
+	Endpoint string `yaml:"endpoint,omitempty"`
+	// Protocol selects the OTLP transport: "http" (OTLP/HTTP protobuf, default)
+	// or "grpc".
+	Protocol string `yaml:"protocol,omitempty"`
+	// Insecure disables TLS (grpc) / uses http:// (http). Default false.
+	Insecure bool `yaml:"insecure,omitempty"`
+	// ServiceName is the resource service.name reported to the collector
+	// (default "aitori").
+	ServiceName string `yaml:"service_name,omitempty"`
+	// Headers are static headers sent on every OTLP export (e.g. an auth token,
+	// a tenant/project selector). Values support ${ENV} expansion.
+	Headers map[string]string `yaml:"headers,omitempty"`
+	// Timeout bounds a single export attempt (e.g. "10s"). Default 10s.
+	Timeout string `yaml:"timeout,omitempty"`
+	// CaptureContent records prompt/completion content on spans. OFF by default:
+	// on a shared/employee device the message content is sensitive, so only the
+	// metadata (model, token counts, latency) is captured unless this is set.
+	CaptureContent bool `yaml:"capture_content,omitempty"`
+	// MaxCaptureKB bounds how much of a non-streaming response body is held in
+	// memory to extract token usage; beyond it the body is truncated (and then
+	// not parsed). Streaming (SSE) responses are scanned incrementally and never
+	// fully held. 0 uses the built-in default (256 KiB).
+	MaxCaptureKB int `yaml:"max_capture_kb,omitempty"`
+	// Categories selects which classified categories are turned into spans.
+	// Default ["llm", "mcp"].
+	Categories []string `yaml:"categories,omitempty"`
+	// SampleRatio is the head-based sampling ratio in [0,1]. 0 (unset) means
+	// always sample.
+	SampleRatio float64 `yaml:"sample_ratio,omitempty"`
+	// Batch tunes the batch span processor.
+	Batch BatchConfig `yaml:"batch,omitempty"`
+}
+
+// BatchConfig tunes the OpenTelemetry batch span processor. Zero fields fall
+// back to the SDK defaults (queue 2048, batch 512, timeout 5s, export 30s).
+type BatchConfig struct {
+	MaxQueueSize       int    `yaml:"max_queue_size,omitempty"`
+	MaxExportBatchSize int    `yaml:"max_export_batch_size,omitempty"`
+	BatchTimeout       string `yaml:"batch_timeout,omitempty"`
+	ExportTimeout      string `yaml:"export_timeout,omitempty"`
+}
+
+// TracingProtocol constants.
+const (
+	TracingProtocolHTTP = "http"
+	TracingProtocolGRPC = "grpc"
+)
+
+// ProtocolOrDefault returns the configured OTLP protocol, defaulting to http.
+func (t TracingConfig) ProtocolOrDefault() string {
+	if t.Protocol == "" {
+		return TracingProtocolHTTP
+	}
+	return t.Protocol
+}
+
+// ServiceNameOrDefault returns the resource service name, defaulting to aitori.
+func (t TracingConfig) ServiceNameOrDefault() string {
+	if t.ServiceName == "" {
+		return "aitori"
+	}
+	return t.ServiceName
+}
+
+// CategoriesOrDefault returns the categories to trace, defaulting to llm+mcp.
+func (t TracingConfig) CategoriesOrDefault() []string {
+	if len(t.Categories) == 0 {
+		return []string{CategoryLLM, CategoryMCP}
+	}
+	return t.Categories
+}
+
+// CaptureLimitBytes returns the response-body capture bound in bytes, or 0 to
+// let the accumulator use its built-in default.
+func (t TracingConfig) CaptureLimitBytes() int {
+	if t.MaxCaptureKB > 0 {
+		return t.MaxCaptureKB * 1024
+	}
+	return 0
+}
+
+// TimeoutOrDefault returns the export attempt timeout, defaulting to 10s.
+func (t TracingConfig) TimeoutOrDefault() time.Duration {
+	if d, err := time.ParseDuration(t.Timeout); err == nil && d > 0 {
+		return d
+	}
+	return 10 * time.Second
 }
 
 // SinkConfig configures an optional local observability sink (debug only).
