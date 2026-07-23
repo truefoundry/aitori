@@ -236,6 +236,13 @@ tracing:
     TFY-Tracing-Project: "truefoundry:tracing-project:my-project"
   categories: [llm, mcp]                              # what to turn into spans
   capture_content: false                             # prompt/completion content (off)
+  truefoundry_attributes: true                       # also emit tfy.* schema (on)
+  attribution:                                       # who the traffic belongs to
+    subject: "${AITORI_USER_EMAIL:-}"                # defaults to the OS user
+    subject_type: user
+    tenant: "${AITORI_TENANT:-}"
+    # teams: [platform, ml]
+    # metadata: { cost_center: research }
   sample_ratio: 1.0                                   # head sampling, 0..1
   batch:
     max_queue_size: 2048
@@ -262,7 +269,43 @@ tracing:
   response body is held in memory to read token usage; beyond it the body is
   truncated and not parsed. Streaming (SSE) responses are scanned line by line
   and never fully buffered, so token usage is captured regardless of size.
+
+  To keep response bodies inspectable, traced requests are sent upstream with
+  `Accept-Encoding: gzip` (browsers otherwise negotiate `br`/`zstd`, which the
+  agent cannot decode); the response is gunzipped for parsing while the client
+  still receives a valid response. A body in an encoding aitori can't decode is
+  skipped rather than captured as binary, and any non-UTF-8 content is dropped
+  from the span so an export batch is never rejected.
 - `categories` — which classified categories become spans (default `llm` + `mcp`).
+- `truefoundry_attributes` — **on by default.** In addition to the vendor-neutral
+  `gen_ai.*` conventions, stamps each span with TrueFoundry's native `tfy.*`
+  schema (`tfy.span_type`, `tfy.model.name`, `tfy.model.request_url`,
+  `tfy.model.metric.input_tokens`/`output_tokens`/`latency_in_ms`, and — when
+  `capture_content` is on — the raw request/response bodies as `tfy.input` /
+  `tfy.output`). This makes aitori spans render in the TrueFoundry tracing UI
+  identically to gateway-produced ones, and sets the span name to the gateway
+  convention (`ChatCompletion: <model>`, `Messages: <model>`, `MCP: <method>`).
+  Set to `false` to emit only `gen_ai.*`.
+- `attribution` — **who the captured traffic belongs to.** aitori has no gateway
+  auth session, so — mirroring how the gateway derives `created_by_subject` from
+  the caller's session — the subject defaults to the **invoking OS user**
+  (SUDO_USER-aware, so `sudo aitori up` attributes to the real user, not root).
+  It is emitted as the vendor-neutral `user.id` on every span, plus (when
+  `truefoundry_attributes` is on) the gateway-shaped `tfy.request.created_by_subject`
+  (JSON `{subjectId, subjectSlug, subjectType, tenantName}`),
+  `tfy.request.tenant_name`, `tfy.request.created_by_subject_teams`, and
+  `tfy.request.metadata` (merged with `aitori.app`). Fields:
+  - `subject` — subject slug (usually an email/username); defaults to the OS user.
+  - `subject_id` — stable id; defaults to `subject`.
+  - `subject_type` — `user` (default), `serviceaccount`, ….
+  - `tenant` — TrueFoundry tenant/control-plane name.
+  - `teams` — the subject's team slugs.
+  - `metadata` — arbitrary key/values merged into `tfy.request.metadata`.
+
+  `subject`, `subject_id`, `tenant`, and metadata values support `${ENV}` /
+  `${ENV:-default}` expansion, so a fleet MDM can inject each employee's identity
+  from the environment (e.g. `subject: "${AITORI_USER_EMAIL}"`) without editing
+  the shipped config.
 - `insecure` — use `http://` / skip TLS (for a local collector).
 - `sample_ratio` — head-based sampling in `0..1`; unset/`0` always samples.
 - `batch` — batch span processor tuning; omitted fields use the SDK defaults

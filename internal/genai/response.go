@@ -1,8 +1,13 @@
 package genai
 
 import (
+	"bufio"
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"encoding/json"
+	"io"
 	"strings"
 )
 
@@ -16,16 +21,35 @@ const maxLineBuffer = 1 * 1024 * 1024 // 1 MiB per SSE line
 // buffer, which is truncated (and then not parsed) once the limit is reached.
 const DefaultCaptureLimit = 256 * 1024 // 256 KiB
 
+// maxDecodedScan bounds how many DECODED bytes are scanned from a compressed
+// body, so a decompression bomb (tiny gzip -> huge output) can't burn unbounded
+// CPU. It is generous enough to reach the usage event at the end of a long SSE
+// stream while still capping worst-case work.
+const maxDecodedScan = 8 * 1024 * 1024 // 8 MiB
+
 // ResponseAccumulator incrementally consumes a response body as it streams to
 // the client and extracts GenAI metadata (model, token usage, finish reasons,
 // and — when enabled — completion text). It is fed via Write from the proxy's
 // verbatim copy loop, so it never buffers or delays the streamed response; for
 // SSE it only assembles one line at a time.
+//
+// The proxy forwards the response to the client verbatim (still compressed),
+// but the accumulator must parse text, so when the body is gzip/deflate-encoded
+// it is decoded here via a streaming pipe before being scanned. (The proxy
+// normalizes traced requests to Accept-Encoding: gzip so the upstream does not
+// pick br/zstd, which the standard library cannot decode.)
 type ResponseAccumulator struct {
 	provider       string
 	captureContent bool
 	sse            bool
-	limit          int // max bytes buffered for a non-streaming JSON body
+	limit          int    // max bytes buffered for a non-streaming JSON body
+	encoding       string // response Content-Encoding, lower-cased ("" = identity)
+
+	// Streaming decompression pipeline (started lazily on first Write when the
+	// body is compressed). Write pushes raw bytes into pw; a goroutine reads the
+	// decoded stream and calls ingest. Result closes pw and waits on done.
+	pw   *io.PipeWriter
+	done chan struct{}
 
 	line      bytes.Buffer // partial SSE line
 	json      bytes.Buffer // non-SSE JSON body, buffered up to limit then truncated
@@ -33,13 +57,19 @@ type ResponseAccumulator struct {
 	content   strings.Builder
 	sawSSEEnd bool
 
+	raw     bytes.Buffer // raw body prefix for tfy.output (content capture only)
+	rawOver bool         // raw buffer hit the limit; a truncated prefix is kept
+
 	info ResponseInfo
 }
 
 // NewResponseAccumulator builds an accumulator for a response with the given
-// provider and Content-Type. SSE is detected from the content type. limit
-// bounds the non-streaming JSON buffer (bytes); <=0 uses DefaultCaptureLimit.
-func NewResponseAccumulator(provider, contentType string, captureContent bool, limit int) *ResponseAccumulator {
+// provider, Content-Type, and Content-Encoding. SSE is detected from the content
+// type. limit bounds the non-streaming JSON buffer (bytes); <=0 uses
+// DefaultCaptureLimit. A gzip/deflate contentEncoding is transparently decoded;
+// any other non-empty encoding (e.g. br/zstd) is treated as un-inspectable and
+// the body is skipped rather than captured as binary.
+func NewResponseAccumulator(provider, contentType, contentEncoding string, captureContent bool, limit int) *ResponseAccumulator {
 	if limit <= 0 {
 		limit = DefaultCaptureLimit
 	}
@@ -47,15 +77,122 @@ func NewResponseAccumulator(provider, contentType string, captureContent bool, l
 		provider:       provider,
 		captureContent: captureContent,
 		limit:          limit,
+		encoding:       strings.ToLower(strings.TrimSpace(contentEncoding)),
 		sse:            strings.Contains(strings.ToLower(contentType), "text/event-stream"),
 	}
 }
 
+// decodable reports whether the response encoding can be decoded with the
+// standard library. Identity (no encoding) is trivially "decodable".
+func (a *ResponseAccumulator) decodable() bool {
+	switch a.encoding {
+	case "", "gzip", "x-gzip", "deflate":
+		return true
+	default:
+		return false
+	}
+}
+
 // Write feeds streamed response bytes. It never returns an error and never
-// blocks: parsing failures are ignored so the response path is unaffected.
+// blocks the response path: parsing failures are ignored. Compressed bodies are
+// routed through the decompression pipeline; identity bodies are ingested
+// directly.
 func (a *ResponseAccumulator) Write(p []byte) {
-	if a == nil {
+	if a == nil || len(p) == 0 {
 		return
+	}
+	if !a.decodable() {
+		// Unknown compression (br/zstd): we can't turn this into text, so don't
+		// capture it as binary — skip entirely (metadata like status/latency
+		// still comes from the exchange, not the body).
+		return
+	}
+	if a.encoding == "" {
+		a.ingest(p)
+		return
+	}
+	// Compressed: push into the decompression pipe; a goroutine ingests decoded.
+	if a.pw == nil {
+		a.startDecompressor()
+	}
+	_, _ = a.pw.Write(p) // pipe write only errors after Close/CloseWithError
+}
+
+// startDecompressor spins up the goroutine that decodes the compressed body and
+// feeds the decoded bytes to ingest, bounded by maxDecodedScan.
+func (a *ResponseAccumulator) startDecompressor() {
+	pr, pw := io.Pipe()
+	a.pw = pw
+	a.done = make(chan struct{})
+	go func() {
+		defer close(a.done)
+		// Always drain the pipe so Write never blocks, even after we stop.
+		defer io.Copy(io.Discard, pr) //nolint:errcheck
+
+		r, err := newDecoder(a.encoding, pr)
+		if err != nil {
+			return
+		}
+		if c, ok := r.(io.Closer); ok {
+			defer c.Close()
+		}
+		buf := make([]byte, 32*1024)
+		var scanned int
+		for {
+			n, rerr := r.Read(buf)
+			if n > 0 {
+				if scanned+n > maxDecodedScan {
+					n = maxDecodedScan - scanned
+				}
+				if n > 0 {
+					a.ingest(buf[:n])
+					scanned += n
+				}
+				if scanned >= maxDecodedScan {
+					return
+				}
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+}
+
+// newDecoder returns a reader that decodes the given Content-Encoding. "deflate"
+// is ambiguous on the wire (zlib-wrapped vs raw); zlib is tried first (what most
+// servers actually send) with a raw-flate fallback.
+func newDecoder(encoding string, r io.Reader) (io.Reader, error) {
+	switch encoding {
+	case "gzip", "x-gzip":
+		return gzip.NewReader(r)
+	case "deflate":
+		br := bufio.NewReader(r)
+		if zr, err := zlib.NewReader(br); err == nil {
+			return zr, nil
+		}
+		return flate.NewReader(br), nil
+	default:
+		return r, nil
+	}
+}
+
+// ingest folds a chunk of DECODED (or identity) response bytes into the buffers:
+// the bounded raw body (for tfy.output), plus the SSE line assembler or the
+// non-streaming JSON buffer.
+func (a *ResponseAccumulator) ingest(p []byte) {
+	// Retain the raw body (for tfy.output) up to the limit, then keep the
+	// truncated prefix. Only when content capture is on. Works for both SSE and
+	// JSON so streamed responses still surface an (bounded) output payload.
+	if a.captureContent && !a.rawOver {
+		if a.raw.Len()+len(p) > a.limit {
+			if n := a.limit - a.raw.Len(); n > 0 {
+				a.raw.Write(p[:n])
+			}
+			a.rawOver = true
+		} else {
+			a.raw.Write(p)
+		}
 	}
 	if a.sse {
 		a.feedSSE(p)
@@ -105,9 +242,16 @@ func (a *ResponseAccumulator) consumeLine(raw []byte) {
 }
 
 // Result finalizes parsing (for non-SSE bodies) and returns the extracted info.
+// If a decompression pipeline is running it is closed and drained first, so all
+// decoded bytes have been ingested before the buffers are read.
 func (a *ResponseAccumulator) Result() ResponseInfo {
 	if a == nil {
 		return ResponseInfo{}
+	}
+	if a.pw != nil {
+		_ = a.pw.Close() // signal EOF to the decoder
+		<-a.done         // wait until the goroutine has ingested everything
+		a.pw = nil
 	}
 	if !a.sse && !a.jsonOver && a.json.Len() > 0 {
 		var m map[string]any
@@ -117,6 +261,7 @@ func (a *ResponseAccumulator) Result() ResponseInfo {
 	}
 	if a.captureContent {
 		a.info.Content = clamp(a.content.String(), maxContentField)
+		a.info.RawBody = a.raw.String()
 	}
 	return a.info
 }

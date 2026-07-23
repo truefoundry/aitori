@@ -9,6 +9,11 @@ import (
 // so a very large prompt/completion can't bloat a span attribute.
 const maxContentField = 8 * 1024
 
+// maxRawField bounds the raw request/response body we retain for the TrueFoundry
+// tfy.input/tfy.output attributes. The request body is already capped by the
+// proxy (max_body_kb); this is a second safety bound.
+const maxRawField = 1024 * 1024 // 1 MiB
+
 // ProviderFor infers the GenAI provider from the request host. It is a
 // best-effort mapping; an unknown host returns the host itself so the span still
 // carries a provider-ish label.
@@ -89,6 +94,7 @@ func ParseRequest(host, path string, body []byte, captureContent bool) RequestIn
 			info.System = clamp(s, maxContentField)
 		}
 		info.Messages = extractMessages(m)
+		info.RawBody = clamp(string(body), maxRawField)
 	}
 	return info
 }

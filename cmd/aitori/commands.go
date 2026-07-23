@@ -28,6 +28,7 @@ import (
 	"github.com/truefoundry/aitori/internal/proxy"
 	"github.com/truefoundry/aitori/internal/router"
 	"github.com/truefoundry/aitori/internal/sink"
+	"github.com/truefoundry/aitori/internal/sysuser"
 	"github.com/truefoundry/aitori/internal/token"
 	"github.com/truefoundry/aitori/internal/tracing"
 	"github.com/truefoundry/aitori/internal/version"
@@ -93,7 +94,7 @@ func buildAgent(cmd *cobra.Command) (*agent, error) {
 	// receiver via a batch processor — an alternative to a gateway for capture.
 	var tracer *tracing.Provider
 	if cfg.Tracing.Enabled {
-		tracer, err = tracing.New(context.Background(), cfg.Tracing, version.Version, deviceHostname(), log)
+		tracer, err = tracing.New(context.Background(), cfg.Tracing, version.Version, deviceHostname(), sysuser.Username(), log)
 		if err != nil {
 			return nil, fmt.Errorf("init tracing: %w", err)
 		}

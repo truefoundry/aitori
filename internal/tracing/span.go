@@ -2,7 +2,9 @@ package tracing
 
 import (
 	"encoding/json"
+	"math"
 	"strconv"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -48,16 +50,66 @@ const (
 	attrGatewayGap = "aitori.gateway_gap"
 )
 
+// User-attribution keys. attrUserID is the vendor-neutral OpenTelemetry general
+// attribute; the tfy.request.* keys mirror the gateway's created_by_subject
+// shape so aitori spans group by user in the TrueFoundry UI.
+const (
+	attrUserID              = "user.id"
+	attrTFYCreatedBySubject = "tfy.request.created_by_subject"
+	attrTFYSubjectTeams     = "tfy.request.created_by_subject_teams"
+	attrTFYTenant           = "tfy.request.tenant_name"
+)
+
+// TrueFoundry native span-attribute schema (tfy.*). Emitted alongside the
+// gen_ai.* conventions so spans render in the TrueFoundry tracing UI identically
+// to gateway-produced ones. Keys mirror TFY_TRACE_ATTRIBUTES in tfy-llm-gateway.
+const (
+	attrTFYSpanType       = "tfy.span_type"
+	attrTFYInput          = "tfy.input"
+	attrTFYOutput         = "tfy.output"
+	attrTFYErrorType      = "tfy.error_type"
+	attrTFYErrorMessage   = "tfy.error_message"
+	attrTFYRequestModel   = "tfy.request.model_name"
+	attrTFYRequestMeta    = "tfy.request.metadata"
+	attrTFYModelName      = "tfy.model.name"
+	attrTFYModelReqURL    = "tfy.model.request_url"
+	attrTFYModelReqType   = "tfy.model.request_type"
+	attrTFYModelStreaming = "tfy.model.streaming"
+	attrTFYMetricInTok    = "tfy.model.metric.input_tokens"
+	attrTFYMetricOutTok   = "tfy.model.metric.output_tokens"
+	attrTFYMetricCacheR   = "tfy.model.metric.cache_read_input_tokens"
+	attrTFYMetricCacheC   = "tfy.model.metric.cache_creation_input_tokens"
+	attrTFYMetricLatency  = "tfy.model.metric.latency_in_ms"
+	attrTFYMCPMethod      = "tfy.mcp_server.method"
+	attrTFYMCPURL         = "tfy.mcp_server.url"
+)
+
+// TrueFoundry span_type / model_request_type values (subset of SpanType in
+// tfy-llm-gateway that aitori can produce).
+const (
+	tfySpanChatCompletion = "ChatCompletion"
+	tfySpanMessages       = "Messages"
+	tfySpanEmbedding      = "Embedding"
+	tfySpanCompletion     = "Completion"
+	tfySpanMCP            = "MCP"
+	tfySpanAIProxy        = "AIProxy"
+)
+
 // setAttributes populates a span from the observation and returns the applied
 // attributes (so callers can log them under debug). Content-bearing attributes
 // (prompt/completion) are present only when the proxy captured content (config
-// tracing.capture_content), so they are set whenever populated.
-func setAttributes(span trace.Span, o genai.Observation) []attribute.KeyValue {
+// tracing.capture_content), so they are set whenever populated. When tfy is set,
+// the TrueFoundry tfy.* schema is emitted alongside the gen_ai.* conventions.
+func setAttributes(span trace.Span, o genai.Observation, tfy bool, attr Attribution) []attribute.KeyValue {
 	attrs := []attribute.KeyValue{
 		semconv.ServerAddress(o.Host),
 		attribute.String(attrCategory, o.Category),
 		attribute.String(attrAction, o.Action),
 		attribute.Bool(attrRerouted, o.Rerouted),
+	}
+	// User attribution: vendor-neutral user.id on every span.
+	if attr.SubjectSlug != "" {
+		attrs = append(attrs, attribute.String(attrUserID, attr.SubjectSlug))
 	}
 	if o.Method != "" {
 		attrs = append(attrs, semconv.HTTPRequestMethodKey.String(o.Method))
@@ -85,8 +137,181 @@ func setAttributes(span trace.Span, o genai.Observation) []attribute.KeyValue {
 		attrs = append(attrs, mcpAttributes(o)...)
 	}
 
+	if tfy {
+		attrs = append(attrs, tfyAttributes(o, attr)...)
+	}
+
 	span.SetAttributes(attrs...)
 	return attrs
+}
+
+// tfyAttribution emits the gateway's created_by_subject shape (subject JSON,
+// tenant, teams) so aitori spans attribute to the invoking user in the
+// TrueFoundry tracing UI.
+func tfyAttribution(attr Attribution) []attribute.KeyValue {
+	var attrs []attribute.KeyValue
+	if attr.SubjectSlug != "" || attr.SubjectID != "" {
+		subj := map[string]string{
+			"subjectId":   attr.SubjectID,
+			"subjectSlug": attr.SubjectSlug,
+			"subjectType": attr.SubjectType,
+			"tenantName":  attr.Tenant,
+		}
+		if b, err := json.Marshal(subj); err == nil {
+			attrs = append(attrs, attribute.String(attrTFYCreatedBySubject, string(b)))
+		}
+	}
+	if attr.Tenant != "" {
+		attrs = append(attrs, attribute.String(attrTFYTenant, attr.Tenant))
+	}
+	if len(attr.Teams) > 0 {
+		attrs = append(attrs, attribute.StringSlice(attrTFYSubjectTeams, attr.Teams))
+	}
+	return attrs
+}
+
+// tfySpanType maps an observation onto a TrueFoundry span_type / request_type.
+func tfySpanType(o genai.Observation) string {
+	switch o.Category {
+	case config.CategoryMCP:
+		return tfySpanMCP
+	case config.CategoryLLM:
+		switch o.Request.Operation {
+		case genai.OpEmbeddings:
+			return tfySpanEmbedding
+		case genai.OpTextGen:
+			return tfySpanCompletion
+		}
+		// Anthropic's /v1/messages surface maps to the Messages request type.
+		if o.Request.Provider == genai.ProviderAnthropic {
+			return tfySpanMessages
+		}
+		return tfySpanChatCompletion
+	default:
+		return tfySpanAIProxy
+	}
+}
+
+// tfyAttributes emits the TrueFoundry tfy.* schema so the span renders in the
+// TrueFoundry tracing UI like a gateway-produced one.
+func tfyAttributes(o genai.Observation, attr Attribution) []attribute.KeyValue {
+	req, resp := o.Request, o.Response
+	spanType := tfySpanType(o)
+	attrs := []attribute.KeyValue{attribute.String(attrTFYSpanType, spanType)}
+
+	if u := requestURL(o); u != "" {
+		attrs = append(attrs, attribute.String(attrTFYModelReqURL, u))
+	}
+	// Latency is always known.
+	attrs = append(attrs, attribute.Float64(attrTFYMetricLatency, latencyMS(o)))
+	// User attribution (created_by_subject, tenant, teams).
+	attrs = append(attrs, tfyAttribution(attr)...)
+	// Metadata merges the resolving app with any configured attribution metadata.
+	if meta := requestMetadata(o, attr); len(meta) > 0 {
+		if b, err := json.Marshal(meta); err == nil {
+			attrs = append(attrs, attribute.String(attrTFYRequestMeta, string(b)))
+		}
+	}
+	if o.Err != "" {
+		attrs = append(attrs,
+			attribute.String(attrTFYErrorMessage, o.Err),
+			attribute.String(attrTFYErrorType, "proxy_error"),
+		)
+	}
+	// Raw request/response bodies (content capture only). Guard against invalid
+	// UTF-8: OTLP string fields must be valid UTF-8, and a single bad byte would
+	// otherwise make the exporter reject the whole batch (dropping all spans).
+	if s, ok := validUTF8(req.RawBody); ok {
+		attrs = append(attrs, attribute.String(attrTFYInput, s))
+	}
+	if s, ok := validUTF8(resp.RawBody); ok {
+		attrs = append(attrs, attribute.String(attrTFYOutput, s))
+	}
+
+	if o.Category == config.CategoryMCP {
+		if req.RPCMethod != "" {
+			attrs = append(attrs, attribute.String(attrTFYMCPMethod, req.RPCMethod))
+		}
+		if u := requestURL(o); u != "" {
+			attrs = append(attrs, attribute.String(attrTFYMCPURL, u))
+		}
+		return attrs
+	}
+
+	// LLM (model-request) attributes.
+	model := req.Model
+	if model == "" {
+		model = resp.Model
+	}
+	if model != "" {
+		attrs = append(attrs, attribute.String(attrTFYModelName, model))
+	}
+	if req.Model != "" {
+		attrs = append(attrs, attribute.String(attrTFYRequestModel, req.Model))
+	}
+	attrs = append(attrs,
+		attribute.String(attrTFYModelReqType, spanType),
+		attribute.Bool(attrTFYModelStreaming, req.Stream),
+	)
+	if resp.InputTokens > 0 {
+		attrs = append(attrs, attribute.Int(attrTFYMetricInTok, resp.InputTokens))
+	}
+	if resp.OutputTokens > 0 {
+		attrs = append(attrs, attribute.Int(attrTFYMetricOutTok, resp.OutputTokens))
+	}
+	if resp.CacheReadInputTokens > 0 {
+		attrs = append(attrs, attribute.Int(attrTFYMetricCacheR, resp.CacheReadInputTokens))
+	}
+	if resp.CacheCreationInputTokens > 0 {
+		attrs = append(attrs, attribute.Int(attrTFYMetricCacheC, resp.CacheCreationInputTokens))
+	}
+	return attrs
+}
+
+// validUTF8 returns s and true when s is non-empty and valid UTF-8. A non-empty
+// body that is not valid UTF-8 (e.g. an undecoded binary payload) is dropped
+// rather than emitted, since OTLP string attributes must be valid UTF-8 — one
+// invalid byte would cause the collector export to reject the entire batch.
+func validUTF8(s string) (string, bool) {
+	if s == "" || !utf8.ValidString(s) {
+		return "", false
+	}
+	return s, true
+}
+
+// requestMetadata merges the configured attribution metadata with the resolving
+// app, forming the tfy.request.metadata JSON object. Configured keys win over
+// the built-in aitori.app so a deployment can override it deliberately.
+func requestMetadata(o genai.Observation, attr Attribution) map[string]string {
+	if o.App == "" && len(attr.Metadata) == 0 {
+		return nil
+	}
+	meta := make(map[string]string, len(attr.Metadata)+1)
+	if o.App != "" {
+		meta["aitori.app"] = o.App
+	}
+	for k, v := range attr.Metadata {
+		meta[k] = v
+	}
+	return meta
+}
+
+// requestURL reconstructs the client-visible request URL from the observation.
+func requestURL(o genai.Observation) string {
+	if o.Host == "" {
+		return ""
+	}
+	scheme := o.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	return scheme + "://" + o.Host + o.Path
+}
+
+// latencyMS returns the exchange duration in milliseconds, rounded to 2 dp.
+func latencyMS(o genai.Observation) float64 {
+	ms := float64(o.Duration().Microseconds()) / 1000.0
+	return math.Round(ms*100) / 100
 }
 
 func genAIAttributes(o genai.Observation) []attribute.KeyValue {

@@ -47,6 +47,7 @@ type RequestInfo struct {
 	System      string    // optional system prompt (content capture only)
 	Messages    []Message // populated only when content capture is enabled
 	RPCMethod   string    // JSON-RPC method, for MCP calls
+	RawBody     string    // raw request body (content capture only), bounded
 }
 
 // ResponseInfo is what we learned from the response body/stream.
@@ -60,6 +61,7 @@ type ResponseInfo struct {
 	ReasoningOutputTokens    int
 	FinishReasons            []string
 	Content                  string // completion text, content capture only
+	RawBody                  string // raw response body (content capture only), bounded
 }
 
 // Observation is the full record of one intercepted exchange handed to a

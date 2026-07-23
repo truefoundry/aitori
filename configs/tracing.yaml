@@ -25,6 +25,7 @@ tracing:
   # OTLP receiver. For protocol "http" this is the collector base URL; the
   # "/v1/traces" signal path is appended automatically. For TrueFoundry:
   endpoint: https://internal.devtest.truefoundry.tech/api/otel
+  # endpoint: http://localhost:4318/
   protocol: http # http (OTLP/HTTP protobuf, default) | grpc
   service_name: aitori # resource service.name reported to the collector
 
@@ -35,6 +36,27 @@ tracing:
 
   # Which classified categories become spans (default: llm + mcp).
   categories: [llm, mcp]
+
+  # Also stamp each span with TrueFoundry's native tfy.* attribute schema
+  # (tfy.span_type, tfy.model.*, tfy.model.metric.*, tfy.input/output) in
+  # addition to the OpenTelemetry gen_ai.* conventions, so spans render in the
+  # TrueFoundry tracing UI exactly like gateway-produced ones. Default: true.
+  # Set false to emit only the vendor-neutral gen_ai.* attributes.
+  truefoundry_attributes: true
+
+  # User attribution — who the captured traffic belongs to. Mirrors the
+  # gateway's created_by_subject: emitted as the vendor-neutral user.id plus the
+  # tfy.request.* keys (created_by_subject, tenant_name, created_by_subject_teams,
+  # metadata) so spans group by user in the TrueFoundry UI. When omitted, the
+  # subject defaults to the invoking OS user (SUDO_USER-aware). On a fleet
+  # deployment, inject the employee identity from the environment via ${ENV}.
+  attribution:
+    subject: "${AITORI_USER_EMAIL:-}" # slug/email; falls back to the OS user when empty
+    # subject_id: "${AITORI_USER_ID:-}"   # stable id; defaults to subject
+    subject_type: user # user | serviceaccount | ...
+    tenant: "${AITORI_TENANT:-}" # TrueFoundry tenant/control-plane name
+    # teams: [platform, ml]
+    # metadata: { cost_center: research } # merged into tfy.request.metadata (with aitori.app)
 
   # Prompt/completion CONTENT is OFF by default — on a shared/employee device the
   # message text is sensitive, so only metadata (model, tokens, latency) is

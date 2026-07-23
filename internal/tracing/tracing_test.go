@@ -50,7 +50,7 @@ func TestNewAndEmit(t *testing.T) {
 		Insecure: true,
 		Batch:    config.BatchConfig{MaxExportBatchSize: 1, BatchTimeout: "1s"},
 	}
-	p, err := New(context.Background(), cfg, "test", "dev-host", nil)
+	p, err := New(context.Background(), cfg, "test", "dev-host", "alice", nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestDebugLogsSpanAndHTTPRequest(t *testing.T) {
 		},
 		Batch: config.BatchConfig{MaxExportBatchSize: 1, BatchTimeout: "50ms"},
 	}
-	p, err := New(context.Background(), cfg, "test", "dev-host", log)
+	p, err := New(context.Background(), cfg, "test", "dev-host", "alice", log)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -121,10 +121,13 @@ func TestDebugLogsSpanAndHTTPRequest(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"otel span emitted",
-		"chat gpt-4o",
+		"ChatCompletion: gpt-4o",
 		"otel http export request",
 		"/v1/traces",
-		"Tfy-Tracing-Project", // Go canonicalizes the header name
+		"Tfy-Tracing-Project",            // Go canonicalizes the header name
+		"user.id",                        // vendor-neutral user attribution
+		"tfy.request.created_by_subject", // gateway-shaped subject attribution
+		"alice",                          // the resolved OS-user subject
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("debug log missing %q; got:\n%s", want, out)

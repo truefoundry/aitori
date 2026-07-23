@@ -83,6 +83,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, mitm bool) {
 		oc.provider = genai.ProviderFor(hostmatch.Normalize(host))
 		oc.captureContent = rl.traceContent
 		oc.captureLimit = rl.traceCaptureLimit
+		// Constrain the upstream to an encoding we can decode for inspection.
+		// Browsers advertise br/zstd, which the standard library can't decompress
+		// — the response would then be captured as unparseable binary. Forcing
+		// gzip keeps the body inspectable; the client still receives a valid
+		// (gzip) response it handles natively. Only on traced requests.
+		r.Header.Set("Accept-Encoding", "gzip")
 	}
 	start := time.Now()
 	defer p.record(start, r, scheme, host, dec, oc)
@@ -285,7 +291,7 @@ func (p *Proxy) copyResponse(w http.ResponseWriter, res *http.Response, oc *outc
 	// Arm the GenAI response accumulator before headers are stripped, so it sees
 	// the Content-Type (SSE vs JSON) and can extract token usage from the stream.
 	if oc.trace && oc.respAcc == nil {
-		oc.respAcc = genai.NewResponseAccumulator(oc.provider, res.Header.Get("Content-Type"), oc.captureContent, oc.captureLimit)
+		oc.respAcc = genai.NewResponseAccumulator(oc.provider, res.Header.Get("Content-Type"), res.Header.Get("Content-Encoding"), oc.captureContent, oc.captureLimit)
 	}
 
 	dst := w.Header()

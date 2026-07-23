@@ -266,8 +266,49 @@ type TracingConfig struct {
 	// SampleRatio is the head-based sampling ratio in [0,1]. 0 (unset) means
 	// always sample.
 	SampleRatio float64 `yaml:"sample_ratio,omitempty"`
+	// TruefoundryAttributes also stamps each span with TrueFoundry's native
+	// tfy.* attribute schema (tfy.span_type, tfy.model.*, tfy.input/output,
+	// tfy.model.metric.*) in addition to the OpenTelemetry gen_ai.* semantic
+	// conventions, so spans render in the TrueFoundry tracing UI identically to
+	// gateway-produced ones. Defaults to true; set false to emit only gen_ai.*.
+	TruefoundryAttributes *bool `yaml:"truefoundry_attributes,omitempty"`
+	// Attribution stamps who the traffic belongs to (subject/user, tenant,
+	// teams) onto every span, mirroring the gateway's created_by_subject. On a
+	// laptop the subject defaults to the invoking OS user; a fleet deployment
+	// can override it with the employee's identity via ${ENV} expansion.
+	Attribution AttributionConfig `yaml:"attribution,omitempty"`
 	// Batch tunes the batch span processor.
 	Batch BatchConfig `yaml:"batch,omitempty"`
+}
+
+// AttributionConfig identifies the human/principal the captured traffic belongs
+// to, so spans carry the same created_by_subject shape the gateway records. All
+// string values support ${ENV} / ${ENV:-default} expansion so a fleet MDM can
+// inject the employee's identity from the environment rather than the config
+// file. When Subject is empty it defaults to the invoking OS user.
+type AttributionConfig struct {
+	// Subject is the subject slug (typically an email or username). Defaults to
+	// the invoking OS user when empty.
+	Subject string `yaml:"subject,omitempty"`
+	// SubjectID is a stable subject identifier. Defaults to Subject when empty.
+	SubjectID string `yaml:"subject_id,omitempty"`
+	// SubjectType categorizes the subject (e.g. "user", "serviceaccount").
+	// Defaults to "user".
+	SubjectType string `yaml:"subject_type,omitempty"`
+	// Tenant is the TrueFoundry tenant/control-plane name.
+	Tenant string `yaml:"tenant,omitempty"`
+	// Teams are the subject's team slugs.
+	Teams []string `yaml:"teams,omitempty"`
+	// Metadata are arbitrary key/value pairs merged into tfy.request.metadata.
+	Metadata map[string]string `yaml:"metadata,omitempty"`
+}
+
+// SubjectTypeOrDefault returns the subject type, defaulting to "user".
+func (a AttributionConfig) SubjectTypeOrDefault() string {
+	if a.SubjectType == "" {
+		return "user"
+	}
+	return a.SubjectType
 }
 
 // BatchConfig tunes the OpenTelemetry batch span processor. Zero fields fall
@@ -299,6 +340,12 @@ func (t TracingConfig) ServiceNameOrDefault() string {
 		return "aitori"
 	}
 	return t.ServiceName
+}
+
+// TruefoundryAttributesEnabled reports whether spans should also carry the
+// TrueFoundry tfy.* attribute schema. Defaults to true when unset.
+func (t TracingConfig) TruefoundryAttributesEnabled() bool {
+	return t.TruefoundryAttributes == nil || *t.TruefoundryAttributes
 }
 
 // CategoriesOrDefault returns the categories to trace, defaulting to llm+mcp.

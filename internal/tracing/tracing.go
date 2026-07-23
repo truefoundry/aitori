@@ -42,12 +42,50 @@ type Provider struct {
 	tp     *sdktrace.TracerProvider
 	tracer trace.Tracer
 	log    *slog.Logger
+	tfy    bool        // also emit the TrueFoundry tfy.* attribute schema
+	attr   Attribution // who the captured traffic is attributed to
+}
+
+// Attribution identifies the human/principal the captured traffic belongs to.
+// It mirrors the gateway's created_by_subject shape so aitori-produced spans
+// group by user in the TrueFoundry tracing UI. It is resolved once at startup
+// (the OS user does not change over the process lifetime) and stamped on every
+// span.
+type Attribution struct {
+	SubjectID   string
+	SubjectSlug string
+	SubjectType string
+	Tenant      string
+	Teams       []string
+	Metadata    map[string]string
+}
+
+// resolveAttribution builds the effective attribution from config, defaulting
+// the subject to the invoking OS user (osUser) when the config leaves it empty.
+func resolveAttribution(cfg config.AttributionConfig, osUser string) Attribution {
+	slug := cfg.Subject
+	if slug == "" {
+		slug = osUser
+	}
+	id := cfg.SubjectID
+	if id == "" {
+		id = slug
+	}
+	return Attribution{
+		SubjectID:   id,
+		SubjectSlug: slug,
+		SubjectType: cfg.SubjectTypeOrDefault(),
+		Tenant:      cfg.Tenant,
+		Teams:       cfg.Teams,
+		Metadata:    cfg.Metadata,
+	}
 }
 
 // New builds a Provider from the tracing config. It configures the OTLP
 // exporter (HTTP or gRPC), a batch span processor, and a resource describing
-// this agent. The caller must call Shutdown to flush buffered spans on exit.
-func New(ctx context.Context, cfg config.TracingConfig, serviceVersion, deviceHost string, log *slog.Logger) (*Provider, error) {
+// this agent. osUser is the invoking OS user, used as the default attribution
+// subject. The caller must call Shutdown to flush buffered spans on exit.
+func New(ctx context.Context, cfg config.TracingConfig, serviceVersion, deviceHost, osUser string, log *slog.Logger) (*Provider, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -90,10 +128,16 @@ func New(ctx context.Context, cfg config.TracingConfig, serviceVersion, deviceHo
 	logged.log.Info("otel tracing exporter ready",
 		"service_name", cfg.ServiceNameOrDefault(), "host_name", deviceHost)
 
+	attr := resolveAttribution(cfg.Attribution, osUser)
+	logged.log.Info("otel tracing attribution",
+		"subject", attr.SubjectSlug, "subject_type", attr.SubjectType, "tenant", attr.Tenant)
+
 	return &Provider{
 		tp:     tp,
 		tracer: tp.Tracer(scopeName),
 		log:    log,
+		tfy:    cfg.TruefoundryAttributesEnabled(),
+		attr:   attr,
 	}, nil
 }
 
@@ -175,12 +219,26 @@ func redactHeaders(h http.Header) map[string]string {
 	m := make(map[string]string, len(h))
 	for k, vs := range h {
 		if sensitiveHeaders[strings.ToLower(k)] {
-			m[k] = "<redacted>"
+			m[k] = maskSecret(strings.Join(vs, ","))
 			continue
 		}
 		m[k] = strings.Join(vs, ",")
 	}
 	return m
+}
+
+// maskSecret hides a credential value while still revealing whether it is
+// actually populated — so a missing ${ENV} expansion (e.g. sudo stripped the
+// var, leaving "Bearer " with no token) is diagnosable without leaking secrets.
+func maskSecret(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "<empty>"
+	}
+	// "Bearer " / "Basic " with nothing after the scheme => unexpanded secret.
+	if parts := strings.SplitN(v, " ", 2); len(parts) == 2 && strings.TrimSpace(parts[1]) == "" {
+		return "<empty-token>"
+	}
+	return "<redacted>"
 }
 
 // loggingExporter decorates a SpanExporter to log the result of each batch
@@ -303,12 +361,12 @@ func (p *Provider) Emit(o genai.Observation) {
 	if end.IsZero() {
 		end = time.Now()
 	}
-	name := spanName(o)
+	name := spanName(o, p.tfy)
 	_, span := p.tracer.Start(context.Background(), name,
 		trace.WithTimestamp(start),
 		trace.WithSpanKind(trace.SpanKindClient),
 	)
-	attrs := setAttributes(span, o)
+	attrs := setAttributes(span, o, p.tfy, p.attr)
 	setStatus(span, o)
 	span.End(trace.WithTimestamp(end))
 
@@ -333,8 +391,13 @@ func attrMap(attrs []attribute.KeyValue) map[string]string {
 }
 
 // spanName follows the GenAI convention "{operation} {model}" for LLM calls,
-// "mcp {method}" for MCP, and a generic "{METHOD} {host}" otherwise.
-func spanName(o genai.Observation) string {
+// "mcp {method}" for MCP, and a generic "{METHOD} {host}" otherwise. When tfy is
+// set it instead uses TrueFoundry's convention ("{SpanType}: {model}") so span
+// names match gateway-produced ones in the TrueFoundry UI.
+func spanName(o genai.Observation, tfy bool) string {
+	if tfy {
+		return tfySpanName(o)
+	}
 	switch o.Category {
 	case config.CategoryLLM:
 		op := o.Request.Operation
@@ -352,5 +415,30 @@ func spanName(o genai.Observation) string {
 		return "mcp"
 	default:
 		return fmt.Sprintf("%s %s", o.Method, o.Host)
+	}
+}
+
+// tfySpanName mirrors the gateway span-name conventions: "{SpanType}: {model}"
+// for model requests, "MCP: {method}" for MCP, and "AIProxy: {host}{path}"
+// otherwise.
+func tfySpanName(o genai.Observation) string {
+	st := tfySpanType(o)
+	switch o.Category {
+	case config.CategoryMCP:
+		if o.Request.RPCMethod != "" {
+			return "MCP: " + o.Request.RPCMethod
+		}
+		return "MCP"
+	case config.CategoryLLM:
+		model := o.Request.Model
+		if model == "" {
+			model = o.Response.Model
+		}
+		if model != "" {
+			return st + ": " + model
+		}
+		return st
+	default:
+		return fmt.Sprintf("AIProxy: %s%s", o.Host, o.Path)
 	}
 }

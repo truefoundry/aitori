@@ -99,6 +99,14 @@ func (c *Config) expandPaths() {
 		c.Tracing.Headers[k] = expandEnv(v)
 	}
 	c.Tracing.Endpoint = expandEnv(c.Tracing.Endpoint)
+	// Attribution values may carry the employee identity from the environment
+	// (e.g. subject: "${AITORI_USER_EMAIL}") on a fleet deployment.
+	c.Tracing.Attribution.Subject = expandEnv(c.Tracing.Attribution.Subject)
+	c.Tracing.Attribution.SubjectID = expandEnv(c.Tracing.Attribution.SubjectID)
+	c.Tracing.Attribution.Tenant = expandEnv(c.Tracing.Attribution.Tenant)
+	for k, v := range c.Tracing.Attribution.Metadata {
+		c.Tracing.Attribution.Metadata[k] = expandEnv(v)
+	}
 }
 
 // expandEnv expands ${VAR} and ${VAR:-default} references against the process

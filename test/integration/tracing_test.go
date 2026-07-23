@@ -26,8 +26,8 @@ import (
 	"github.com/truefoundry/aitori/internal/router"
 	"github.com/truefoundry/aitori/internal/tracing"
 
-	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -173,6 +173,19 @@ func newTraceHarness(t *testing.T, cfgMut func(*config.TracingConfig)) *traceHar
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"id":"chatcmpl-1","model":"gpt-4o-mini","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"hi there"}}],"usage":{"prompt_tokens":11,"completion_tokens":4}}`)
 	})
+	mux.HandleFunc("/v1/gzip", func(w http.ResponseWriter, r *http.Request) {
+		// The proxy must have normalized Accept-Encoding to gzip for traced
+		// requests (browsers advertise br/zstd, which we cannot decode).
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			http.Error(w, "expected gzip Accept-Encoding from proxy", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		zw := gzip.NewWriter(w)
+		defer zw.Close()
+		io.WriteString(zw, `{"id":"chatcmpl-gz","model":"gpt-4o-mini","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"gzipped hi"}}],"usage":{"prompt_tokens":21,"completion_tokens":9}}`)
+	})
 	mux.HandleFunc("/v1/sse", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fl, _ := w.(http.Flusher)
@@ -208,7 +221,7 @@ func newTraceHarness(t *testing.T, cfgMut func(*config.TracingConfig)) *traceHar
 	if cfgMut != nil {
 		cfgMut(&tcfg)
 	}
-	tp, err := tracing.New(context.Background(), tcfg, "test", "dev-host", nil)
+	tp, err := tracing.New(context.Background(), tcfg, "test", "dev-host", "alice", nil)
 	if err != nil {
 		t.Fatalf("tracing.New: %v", err)
 	}
@@ -295,11 +308,35 @@ func TestTracingExportsGenAISpan_JSON(t *testing.T) {
 	h.post(t, "/v1/chat/completions", `{"model":"gpt-4o-mini","max_tokens":128,"messages":[{"role":"user","content":"hi"}]}`)
 
 	spans := h.receiver.waitForSpans(t, 1)
-	s := spanByName(spans, "chat gpt-4o-mini")
+	// tfy schema is on by default, so the span name follows the gateway convention.
+	s := spanByName(spans, "ChatCompletion: gpt-4o-mini")
 	if s == nil {
-		t.Fatalf("no 'chat gpt-4o-mini' span; got %d spans: %v", len(spans), spanNames(spans))
+		t.Fatalf("no 'ChatCompletion: gpt-4o-mini' span; got %d spans: %v", len(spans), spanNames(spans))
 	}
 	a := attrs(s)
+	// --- TrueFoundry tfy.* schema (union with gen_ai.*) ---
+	if got := attrStr(a, "tfy.span_type"); got != "ChatCompletion" {
+		t.Errorf("tfy.span_type = %q, want ChatCompletion", got)
+	}
+	if got := attrStr(a, "tfy.model.name"); got != "gpt-4o-mini" {
+		t.Errorf("tfy.model.name = %q, want gpt-4o-mini", got)
+	}
+	if got := attrStr(a, "tfy.model.request_type"); got != "ChatCompletion" {
+		t.Errorf("tfy.model.request_type = %q", got)
+	}
+	if got := attrInt(a, "tfy.model.metric.input_tokens"); got != 11 {
+		t.Errorf("tfy input_tokens = %d, want 11", got)
+	}
+	if got := attrInt(a, "tfy.model.metric.output_tokens"); got != 4 {
+		t.Errorf("tfy output_tokens = %d, want 4", got)
+	}
+	if got := attrStr(a, "tfy.model.request_url"); !strings.Contains(got, "/v1/chat/completions") {
+		t.Errorf("tfy.model.request_url = %q, want to contain /v1/chat/completions", got)
+	}
+	if _, ok := a["tfy.model.metric.latency_in_ms"]; !ok {
+		t.Error("tfy.model.metric.latency_in_ms missing")
+	}
+	// --- gen_ai.* conventions ---
 	if got := attrStr(a, "gen_ai.provider.name"); got != "openai" {
 		t.Errorf("provider = %q, want openai", got)
 	}
@@ -324,9 +361,22 @@ func TestTracingExportsGenAISpan_JSON(t *testing.T) {
 	if got := attrStr(a, "gen_ai.response.model"); got != "gpt-4o-mini" {
 		t.Errorf("response.model = %q", got)
 	}
-	// capture_content defaults off: no content attributes.
+	// --- user attribution: subject defaults to the invoking OS user ("alice") ---
+	if got := attrStr(a, "user.id"); got != "alice" {
+		t.Errorf("user.id = %q, want alice", got)
+	}
+	if got := attrStr(a, "tfy.request.created_by_subject"); !strings.Contains(got, `"subjectSlug":"alice"`) || !strings.Contains(got, `"subjectType":"user"`) {
+		t.Errorf("tfy.request.created_by_subject = %q, want subjectSlug=alice, subjectType=user", got)
+	}
+	// capture_content defaults off: no content attributes (gen_ai or tfy).
 	if _, ok := a["gen_ai.input.messages"]; ok {
 		t.Error("input messages captured despite capture_content=false")
+	}
+	if _, ok := a["tfy.input"]; ok {
+		t.Error("tfy.input captured despite capture_content=false")
+	}
+	if _, ok := a["tfy.output"]; ok {
+		t.Error("tfy.output captured despite capture_content=false")
 	}
 	// Custom export header must have reached the receiver.
 	h.receiver.mu.Lock()
@@ -364,11 +414,18 @@ func TestTracingExportsGenAISpan_SSE(t *testing.T) {
 	}
 
 	spans := h.receiver.waitForSpans(t, 1)
-	s := spanByName(spans, "chat gpt-4o")
+	s := spanByName(spans, "ChatCompletion: gpt-4o")
 	if s == nil {
-		t.Fatalf("no 'chat gpt-4o' span; got %d: %v", len(spans), spanNames(spans))
+		t.Fatalf("no 'ChatCompletion: gpt-4o' span; got %d: %v", len(spans), spanNames(spans))
 	}
 	a := attrs(s)
+	// tfy streaming metrics extracted from the stream too.
+	if got := attrInt(a, "tfy.model.metric.output_tokens"); got != 3 {
+		t.Errorf("tfy output_tokens = %d, want 3", got)
+	}
+	if v, ok := a["tfy.model.streaming"]; !ok || !v.GetBoolValue() {
+		t.Error("tfy.model.streaming should be true")
+	}
 	if got := attrInt(a, "gen_ai.usage.input_tokens"); got != 7 {
 		t.Errorf("input_tokens = %d, want 7 (extracted from stream)", got)
 	}
@@ -391,7 +448,7 @@ func TestTracingCapturesContentWhenEnabled(t *testing.T) {
 	h.post(t, "/v1/chat/completions", `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello world"}]}`)
 
 	spans := h.receiver.waitForSpans(t, 1)
-	s := spanByName(spans, "chat gpt-4o-mini")
+	s := spanByName(spans, "ChatCompletion: gpt-4o-mini")
 	if s == nil {
 		t.Fatalf("no span; got %d: %v", len(spans), spanNames(spans))
 	}
@@ -406,6 +463,115 @@ func TestTracingCapturesContentWhenEnabled(t *testing.T) {
 	out := attrStr(a, "gen_ai.output.messages")
 	if !strings.Contains(out, `"content":"hi there"`) || !strings.Contains(out, `"finish_reason":"stop"`) {
 		t.Errorf("output.messages missing/structured wrong: %q", out)
+	}
+	// tfy.input/tfy.output carry the RAW request/response bodies.
+	tin := attrStr(a, "tfy.input")
+	if !strings.Contains(tin, `"model":"gpt-4o-mini"`) || !strings.Contains(tin, `"hello world"`) {
+		t.Errorf("tfy.input should be the raw request body, got %q", tin)
+	}
+	tout := attrStr(a, "tfy.output")
+	if !strings.Contains(tout, `"usage"`) || !strings.Contains(tout, `hi there`) {
+		t.Errorf("tfy.output should be the raw response body, got %q", tout)
+	}
+}
+
+// TestTracingTruefoundryAttributesDisabled verifies the flag turns off tfy.*.
+func TestTracingTruefoundryAttributesDisabled(t *testing.T) {
+	off := false
+	h := newTraceHarness(t, func(c *config.TracingConfig) { c.TruefoundryAttributes = &off })
+
+	h.post(t, "/v1/chat/completions", `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}`)
+
+	spans := h.receiver.waitForSpans(t, 1)
+	// With tfy off, the span uses the gen_ai naming convention again.
+	s := spanByName(spans, "chat gpt-4o-mini")
+	if s == nil {
+		t.Fatalf("no 'chat gpt-4o-mini' span; got %v", spanNames(spans))
+	}
+	a := attrs(s)
+	if _, ok := a["tfy.span_type"]; ok {
+		t.Error("tfy.span_type present despite truefoundry_attributes=false")
+	}
+	if _, ok := a["tfy.request.created_by_subject"]; ok {
+		t.Error("tfy.request.created_by_subject present despite truefoundry_attributes=false")
+	}
+	// The vendor-neutral user.id is emitted regardless of the tfy schema flag.
+	if got := attrStr(a, "user.id"); got != "alice" {
+		t.Errorf("user.id = %q, want alice", got)
+	}
+	if got := attrStr(a, "gen_ai.request.model"); got != "gpt-4o-mini" {
+		t.Errorf("gen_ai.request.model = %q, want gpt-4o-mini", got)
+	}
+}
+
+// TestTracingAttributionOverride verifies config-supplied attribution (subject,
+// tenant, teams, metadata) overrides the OS-user default and rides on the span.
+func TestTracingAttributionOverride(t *testing.T) {
+	h := newTraceHarness(t, func(c *config.TracingConfig) {
+		c.Attribution = config.AttributionConfig{
+			Subject:  "bob@corp.example",
+			Tenant:   "acme",
+			Teams:    []string{"platform", "ml"},
+			Metadata: map[string]string{"cost_center": "research"},
+		}
+	})
+
+	h.post(t, "/v1/chat/completions", `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}`)
+
+	spans := h.receiver.waitForSpans(t, 1)
+	s := spanByName(spans, "ChatCompletion: gpt-4o-mini")
+	if s == nil {
+		t.Fatalf("no span; got %v", spanNames(spans))
+	}
+	a := attrs(s)
+	if got := attrStr(a, "user.id"); got != "bob@corp.example" {
+		t.Errorf("user.id = %q, want bob@corp.example", got)
+	}
+	subj := attrStr(a, "tfy.request.created_by_subject")
+	if !strings.Contains(subj, `"subjectSlug":"bob@corp.example"`) || !strings.Contains(subj, `"tenantName":"acme"`) {
+		t.Errorf("created_by_subject = %q, want subjectSlug=bob@corp.example, tenantName=acme", subj)
+	}
+	if got := attrStr(a, "tfy.request.tenant_name"); got != "acme" {
+		t.Errorf("tfy.request.tenant_name = %q, want acme", got)
+	}
+	if v, ok := a["tfy.request.created_by_subject_teams"]; !ok {
+		t.Error("tfy.request.created_by_subject_teams missing")
+	} else if vals := v.GetArrayValue().GetValues(); len(vals) != 2 || vals[0].GetStringValue() != "platform" {
+		t.Errorf("teams = %v, want [platform ml]", vals)
+	}
+	meta := attrStr(a, "tfy.request.metadata")
+	if !strings.Contains(meta, `"cost_center":"research"`) || !strings.Contains(meta, `"aitori.app":"test-llm-app"`) {
+		t.Errorf("tfy.request.metadata = %q, want cost_center + aitori.app", meta)
+	}
+}
+
+// TestTracingDecodesGzipResponse drives a gzip-encoded upstream response through
+// the proxy and asserts the span carries DECODED token usage and body — i.e. the
+// compressed bytes were gunzipped for inspection (and the export was not dropped
+// for invalid UTF-8), while the client still received a readable response.
+func TestTracingDecodesGzipResponse(t *testing.T) {
+	h := newTraceHarness(t, func(c *config.TracingConfig) { c.CaptureContent = true })
+
+	body := h.post(t, "/v1/gzip", `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}`)
+	if !strings.Contains(body, "gzipped hi") {
+		t.Fatalf("client did not receive a decodable body: %q", body)
+	}
+
+	spans := h.receiver.waitForSpans(t, 1)
+	s := spanByName(spans, "ChatCompletion: gpt-4o-mini")
+	if s == nil {
+		t.Fatalf("no span (export may have been dropped); got %v", spanNames(spans))
+	}
+	a := attrs(s)
+	if got := attrInt(a, "tfy.model.metric.input_tokens"); got != 21 {
+		t.Errorf("input_tokens = %d, want 21 (from the gunzipped body)", got)
+	}
+	if got := attrInt(a, "tfy.model.metric.output_tokens"); got != 9 {
+		t.Errorf("output_tokens = %d, want 9 (from the gunzipped body)", got)
+	}
+	tout := attrStr(a, "tfy.output")
+	if !strings.Contains(tout, "gzipped hi") || !strings.Contains(tout, `"usage"`) {
+		t.Errorf("tfy.output should be the DECODED JSON body, got %q", tout)
 	}
 }
 

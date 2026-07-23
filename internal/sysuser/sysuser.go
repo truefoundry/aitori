@@ -45,6 +45,19 @@ func Resolve() (home string, uid, gid int) {
 	return "", uid, gid
 }
 
+// Username returns the invoking user's login name, SUDO_USER-aware so that under
+// `sudo` it resolves the real user rather than root. Falls back to the current
+// process user, then $USER. Best-effort: returns "" if none can be determined.
+func Username() string {
+	if su := os.Getenv("SUDO_USER"); su != "" && su != "root" {
+		return su
+	}
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return os.Getenv("USER")
+}
+
 // Expand expands a leading "~" in p to the invoking user's home directory. A
 // path without a leading "~" is returned unchanged.
 func Expand(p string) string {
